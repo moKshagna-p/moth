@@ -15,6 +15,7 @@ private struct TabInfo: Decodable, Identifiable {
     let url: String
     let title: String
     let loading: Bool
+    let sleeping: Bool
     let workspace: UInt64
 }
 
@@ -69,7 +70,7 @@ private struct ChromeSnapshot: Decodable {
     }
 
     var wallpaperVisible: Bool {
-        activeTab?.url == "about:blank" && snapshot?.panel == nil && wallpaper != nil
+        wallpaper != nil
     }
 
     func send(_ type: String, _ values: [String: Any] = [:]) {
@@ -288,7 +289,7 @@ private struct SidebarView: View {
         let row = HStack(spacing: 10) {
             Button { model.send("switch_tab", ["id": tab.id]) } label: {
                 HStack(spacing: 11) {
-                    Image(systemName: tab.url == "about:blank" ? "square.dashed" : "globe")
+                    Image(systemName: tab.sleeping ? "moon.zzz" : tab.url == "about:blank" ? "square.dashed" : "globe")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(selected ? accent : muted)
                         .frame(width: 17)
@@ -312,6 +313,7 @@ private struct SidebarView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .help(tab.sleeping ? "Sleeping tab — reloads when opened" : tab.url)
             Button { model.send("close_tab", ["id": tab.id]) } label: {
                 Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
                     .frame(width: 22, height: 22)

@@ -35,9 +35,9 @@ pub(crate) enum BrowserEvent {
     #[cfg(target_os = "macos")]
     Menu(MenuEvent),
     Command(Command),
-    PageStarted(u64, String),
-    PageFinished(u64, String),
-    TitleChanged(u64, String),
+    PageStarted(u64, u64, String),
+    PageFinished(u64, u64, String),
+    TitleChanged(u64, u64, String),
     OpenTab(String),
     DownloadStarted(String, String),
     DownloadFinished(String, bool),

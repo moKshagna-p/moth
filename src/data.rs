@@ -34,6 +34,8 @@ pub struct BrowserData {
     pub active_workspace: u64,
     #[serde(default)]
     pub session_tabs: Vec<SessionTab>,
+    #[serde(default)]
+    pub active_tab_index: usize,
     #[serde(default = "default_photo_focus")]
     pub photo_focus_x: u8,
     #[serde(default = "default_photo_focus")]
@@ -63,6 +65,7 @@ impl Default for BrowserData {
             workspaces: default_workspaces(),
             active_workspace: 1,
             session_tabs: Vec::new(),
+            active_tab_index: 0,
             photo_focus_x: default_photo_focus(),
             photo_focus_y: default_photo_focus(),
         }
@@ -157,5 +160,6 @@ mod tests {
     fn older_state_defaults_to_centered_photo() {
         let state: BrowserData = serde_json::from_str("{\"bookmarks\":[],\"history\":[]}").unwrap();
         assert_eq!((state.photo_focus_x, state.photo_focus_y), (50, 50));
+        assert_eq!(state.active_tab_index, 0);
     }
 }

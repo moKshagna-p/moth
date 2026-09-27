@@ -4,6 +4,7 @@ use muda::{
     accelerator::{Accelerator, Code, Modifiers},
     Menu, MenuEvent, MenuItem, Submenu,
 };
+use std::time::{Duration, Instant};
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -18,18 +19,25 @@ pub(crate) fn run() {
     let window = WindowBuilder::new()
         .with_title("Moth")
         .with_inner_size(LogicalSize::new(1200.0, 800.0))
+        .with_min_inner_size(LogicalSize::new(640.0, 480.0))
         .build(&event_loop)
         .expect("Cannot create browser window");
     let mut browser =
         Browser::new(window, event_loop.create_proxy()).expect("Cannot start browser");
+    let mut next_reap = Instant::now() + Duration::from_secs(60);
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                browser.flush_save();
                 *control_flow = ControlFlow::Exit;
+                return;
+            }
+            Event::LoopDestroyed => {
+                browser.flush_save();
+                return;
             }
             Event::WindowEvent {
                 event: WindowEvent::Resized(_),
@@ -38,6 +46,16 @@ pub(crate) fn run() {
             Event::UserEvent(event) => browser.handle_event(event),
             _ => {}
         }
+        if Instant::now() >= next_reap {
+            browser.reap_tabs();
+            next_reap = Instant::now() + Duration::from_secs(60);
+        }
+        browser.flush_save_if_due();
+        *control_flow = ControlFlow::WaitUntil(
+            browser
+                .save_deadline()
+                .map_or(next_reap, |due| due.min(next_reap)),
+        );
     });
 }
 
