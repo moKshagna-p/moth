@@ -192,7 +192,8 @@ impl Browser {
             proxy,
         };
         browser.resize();
-        for tab in restored_tabs {
+        let mut restored_active = None;
+        for (index, tab) in restored_tabs.into_iter().enumerate() {
             if browser
                 .data
                 .workspaces
@@ -200,19 +201,25 @@ impl Browser {
                 .any(|space| space.id == tab.workspace)
             {
                 browser.restore_tab(tab);
+                if index == active_tab_index {
+                    restored_active = browser.tabs.last().map(|tab| tab.id);
+                }
             }
         }
-        if let Some(id) = browser
-            .tabs
-            .get(active_tab_index)
-            .filter(|tab| tab.workspace == active_workspace)
+        if let Some(id) = restored_active
+            .filter(|id| {
+                browser
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.id == *id && tab.workspace == active_workspace)
+            })
             .or_else(|| {
                 browser
                     .tabs
                     .iter()
                     .find(|tab| tab.workspace == active_workspace)
+                    .map(|tab| tab.id)
             })
-            .map(|tab| tab.id)
         {
             browser.activate_tab(id)?;
         } else {
