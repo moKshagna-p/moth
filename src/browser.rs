@@ -7,7 +7,13 @@ use crate::{
 #[cfg(target_os = "macos")]
 use muda::MenuEvent;
 use serde::Serialize;
-use std::{borrow::Cow, fs, path::PathBuf};
+use std::{
+    borrow::Cow,
+    cmp::Reverse,
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event_loop::EventLoopProxy,
@@ -17,6 +23,8 @@ use wry::{http::Response, NewWindowResponse, PageLoadEvent, Rect, WebView, WebVi
 
 const SIDEBAR_WIDTH: f64 = 252.0;
 const TOOLBAR_HEIGHT: f64 = 68.0;
+const MAX_LIVE_TABS: usize = 8;
+const IDLE_TAB_AGE: Duration = Duration::from_secs(15 * 60);
 
 fn shortcut_tab_index(index: usize, count: usize) -> Option<usize> {
     if count == 0 {
@@ -38,10 +46,18 @@ fn adjacent_tab_index(current: usize, count: usize, next: bool) -> Option<usize>
     }
 }
 
+fn eviction_score(idle: Duration, activations: u32) -> u128 {
+    idle.as_millis() / u128::from(activations.clamp(1, 4))
+}
+
 struct Tab {
     id: u64,
     workspace: u64,
-    view: WebView,
+    view: Option<WebView>,
+    visible: bool,
+    generation: u64,
+    last_used: Instant,
+    activations: u32,
     url: String,
     title: String,
     loading: bool,
@@ -54,6 +70,7 @@ struct TabState<'a> {
     url: &'a str,
     title: &'a str,
     loading: bool,
+    sleeping: bool,
 }
 
 #[derive(Serialize)]
@@ -97,6 +114,9 @@ pub(crate) struct Browser {
     photo_path: PathBuf,
     photo_version: u64,
     downloads: Vec<Download>,
+    save_due: Option<Instant>,
+    last_size: Option<(f64, f64)>,
+    shell_visible: Option<bool>,
     proxy: EventLoopProxy<BrowserEvent>,
 }
 
@@ -148,6 +168,7 @@ impl Browser {
 
         let data = BrowserData::load(&data_path);
         let restored_tabs = data.session_tabs.clone();
+        let active_tab_index = data.active_tab_index;
         let active_workspace = data.active_workspace;
         #[cfg(target_os = "macos")]
         crate::native_chrome::install(&window, proxy.clone(), &photo_path);
@@ -165,6 +186,9 @@ impl Browser {
             photo_version: u64::from(photo_path.exists()),
             photo_path,
             downloads: Vec::new(),
+            save_due: None,
+            last_size: None,
+            shell_visible: None,
             proxy,
         };
         browser.resize();
@@ -175,16 +199,22 @@ impl Browser {
                 .iter()
                 .any(|space| space.id == tab.workspace)
             {
-                browser.new_tab_in_workspace(&tab.url, tab.workspace)?;
+                browser.restore_tab(tab);
             }
         }
         if let Some(id) = browser
             .tabs
-            .iter()
-            .find(|tab| tab.workspace == active_workspace)
+            .get(active_tab_index)
+            .filter(|tab| tab.workspace == active_workspace)
+            .or_else(|| {
+                browser
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.workspace == active_workspace)
+            })
             .map(|tab| tab.id)
         {
-            browser.active = id;
+            browser.activate_tab(id)?;
         } else {
             browser.new_tab("about:blank")?;
         }
@@ -200,7 +230,7 @@ impl Browser {
             .to_logical(self.window.scale_factor())
     }
 
-    pub(crate) fn resize(&self) {
+    pub(crate) fn resize(&mut self) {
         let size = self.size();
         let show_shell_page = self.panel.is_some()
             || self
@@ -208,25 +238,30 @@ impl Browser {
                 .is_some_and(|tab| tab.url == "about:blank");
         let content_width = (size.width - SIDEBAR_WIDTH).max(1.0);
         let content_height = (size.height - TOOLBAR_HEIGHT).max(1.0);
-        let _ = self.shell.set_bounds(rect(
-            SIDEBAR_WIDTH,
-            TOOLBAR_HEIGHT,
-            content_width,
-            content_height,
-        ));
-        let _ = self.shell.set_visible(show_shell_page);
-        #[cfg(target_os = "macos")]
-        crate::native_chrome::resize(size.width, size.height);
-        for tab in &self.tabs {
-            let _ = tab.view.set_bounds(rect(
-                SIDEBAR_WIDTH,
-                TOOLBAR_HEIGHT,
-                content_width,
-                content_height,
-            ));
-            let _ = tab
-                .view
-                .set_visible(tab.id == self.active && !show_shell_page);
+        if self.last_size != Some((size.width, size.height)) {
+            let bounds = rect(SIDEBAR_WIDTH, TOOLBAR_HEIGHT, content_width, content_height);
+            let _ = self.shell.set_bounds(bounds);
+            #[cfg(target_os = "macos")]
+            crate::native_chrome::resize(size.width, size.height);
+            for tab in &self.tabs {
+                if let Some(view) = &tab.view {
+                    let _ = view.set_bounds(bounds);
+                }
+            }
+            self.last_size = Some((size.width, size.height));
+        }
+        if self.shell_visible != Some(show_shell_page) {
+            let _ = self.shell.set_visible(show_shell_page);
+            self.shell_visible = Some(show_shell_page);
+        }
+        for tab in &mut self.tabs {
+            let visible = tab.id == self.active && !show_shell_page && tab.view.is_some();
+            if tab.visible != visible {
+                if let Some(view) = &tab.view {
+                    let _ = view.set_visible(visible);
+                }
+                tab.visible = visible;
+            }
         }
     }
 
@@ -237,14 +272,68 @@ impl Browser {
     fn new_tab_in_workspace(&mut self, url: &str, workspace: u64) -> wry::Result<()> {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
+        let view = if url == "about:blank" {
+            None
+        } else {
+            Some(self.build_view(id, 1, url)?)
+        };
+        self.tabs.push(Tab {
+            id,
+            workspace,
+            view,
+            visible: false,
+            generation: 1,
+            last_used: Instant::now(),
+            activations: 1,
+            url: url.into(),
+            title: "New tab".into(),
+            loading: url != "about:blank",
+        });
+        self.active = id;
+        self.panel = None;
+        self.resize();
+        self.reap_tabs();
+        self.refresh();
+        Ok(())
+    }
+
+    fn restore_tab(&mut self, session: SessionTab) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let title = if session.url == "about:blank" {
+            "New tab".into()
+        } else {
+            self.data
+                .history
+                .iter()
+                .find(|entry| entry.url == session.url)
+                .map(|entry| entry.title.clone())
+                .unwrap_or_else(|| session.url.clone())
+        };
+        self.tabs.push(Tab {
+            id,
+            workspace: session.workspace,
+            view: None,
+            visible: false,
+            generation: 0,
+            last_used: Instant::now(),
+            activations: 0,
+            url: session.url,
+            title,
+            loading: false,
+        });
+    }
+
+    fn build_view(&self, id: u64, generation: u64, url: &str) -> wry::Result<WebView> {
         let size = self.size();
         let load_proxy = self.proxy.clone();
         let title_proxy = self.proxy.clone();
         let window_proxy = self.proxy.clone();
         let download_proxy = self.proxy.clone();
         let completed_proxy = self.proxy.clone();
-        let view = WebViewBuilder::new()
+        WebViewBuilder::new()
             .with_url(url)
+            .with_visible(false)
             .with_bounds(rect(
                 SIDEBAR_WIDTH,
                 TOOLBAR_HEIGHT,
@@ -253,13 +342,13 @@ impl Browser {
             ))
             .with_on_page_load_handler(move |event, url| {
                 let message = match event {
-                    PageLoadEvent::Started => BrowserEvent::PageStarted(id, url),
-                    PageLoadEvent::Finished => BrowserEvent::PageFinished(id, url),
+                    PageLoadEvent::Started => BrowserEvent::PageStarted(id, generation, url),
+                    PageLoadEvent::Finished => BrowserEvent::PageFinished(id, generation, url),
                 };
                 let _ = load_proxy.send_event(message);
             })
             .with_document_title_changed_handler(move |title| {
-                let _ = title_proxy.send_event(BrowserEvent::TitleChanged(id, title));
+                let _ = title_proxy.send_event(BrowserEvent::TitleChanged(id, generation, title));
             })
             .with_new_window_req_handler(move |url, _| {
                 let _ = window_proxy.send_event(BrowserEvent::OpenTab(url));
@@ -289,44 +378,116 @@ impl Browser {
             .with_download_completed_handler(move |url, _, success| {
                 let _ = completed_proxy.send_event(BrowserEvent::DownloadFinished(url, success));
             })
-            .build_as_child(&self.window)?;
-        self.active = id;
-        self.tabs.push(Tab {
-            id,
-            workspace,
-            view,
-            url: url.into(),
-            title: "New tab".into(),
-            loading: true,
-        });
-        self.panel = None;
-        self.resize();
-        self.refresh();
-        Ok(())
+            .build_as_child(&self.window)
     }
 
     fn active_tab(&self) -> Option<&Tab> {
         self.tabs.iter().find(|tab| tab.id == self.active)
     }
 
-    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        self.tabs.iter_mut().find(|tab| tab.id == self.active)
+    fn activate_tab(&mut self, id: u64) -> wry::Result<()> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return Ok(());
+        };
+        if self.tabs[index].view.is_none() && self.tabs[index].url != "about:blank" {
+            let generation = self.tabs[index].generation + 1;
+            let view = self.build_view(id, generation, &self.tabs[index].url)?;
+            self.tabs[index].view = Some(view);
+            self.tabs[index].generation = generation;
+            self.tabs[index].loading = true;
+        }
+        self.tabs[index].last_used = Instant::now();
+        self.tabs[index].activations = self.tabs[index].activations.saturating_add(1);
+        self.active = id;
+        self.active_workspace = self.tabs[index].workspace;
+        self.panel = None;
+        self.resize();
+        self.reap_tabs();
+        self.refresh();
+        Ok(())
     }
 
     fn switch_tab(&mut self, id: u64) {
-        if !self.tabs.iter().any(|tab| tab.id == id) {
-            return;
+        if let Err(error) = self.activate_tab(id) {
+            eprintln!("Cannot switch tab: {error}");
         }
-        self.active = id;
-        self.active_workspace = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == id)
-            .map(|tab| tab.workspace)
-            .unwrap_or(self.active_workspace);
+    }
+
+    fn navigate_active(&mut self, url: String) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == self.active) else {
+            return;
+        };
+        if url == "about:blank" {
+            self.tabs[index].view = None;
+            self.tabs[index].visible = false;
+            self.tabs[index].generation += 1;
+            self.tabs[index].loading = false;
+            self.tabs[index].title = "New tab".into();
+        } else if let Some(view) = &self.tabs[index].view {
+            if let Err(error) = view.load_url(&url) {
+                eprintln!("Cannot load {url}: {error}");
+                return;
+            }
+            self.tabs[index].loading = true;
+        } else {
+            let generation = self.tabs[index].generation + 1;
+            match self.build_view(self.active, generation, &url) {
+                Ok(view) => {
+                    self.tabs[index].view = Some(view);
+                    self.tabs[index].generation = generation;
+                    self.tabs[index].loading = true;
+                }
+                Err(error) => {
+                    eprintln!("Cannot load {url}: {error}");
+                    return;
+                }
+            }
+        }
+        self.tabs[index].url = url;
+        self.tabs[index].last_used = Instant::now();
         self.panel = None;
         self.resize();
-        self.refresh();
+    }
+
+    pub(crate) fn reap_tabs(&mut self) {
+        let now = Instant::now();
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            if tab.id != self.active
+                && tab.view.is_some()
+                && eviction_score(now.duration_since(tab.last_used), tab.activations)
+                    >= IDLE_TAB_AGE.as_millis()
+            {
+                tab.view = None;
+                tab.visible = false;
+                tab.loading = false;
+                tab.generation += 1;
+                changed = true;
+            }
+        }
+        while self.tabs.iter().filter(|tab| tab.view.is_some()).count() > MAX_LIVE_TABS {
+            let candidate = self
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(_, tab)| tab.id != self.active && tab.view.is_some())
+                .max_by_key(|(_, tab)| {
+                    (
+                        eviction_score(now.duration_since(tab.last_used), tab.activations),
+                        Reverse(tab.last_used),
+                    )
+                })
+                .map(|(index, _)| index);
+            let Some(index) = candidate else { break };
+            self.tabs[index].view = None;
+            self.tabs[index].visible = false;
+            self.tabs[index].loading = false;
+            self.tabs[index].generation += 1;
+            changed = true;
+        }
+        if changed {
+            self.refresh();
+        }
     }
 
     fn close_tab(&mut self, id: u64) {
@@ -366,16 +527,7 @@ impl Browser {
     fn handle_command(&mut self, command: Command) {
         match command {
             Command::Navigate { value } => {
-                let url = resolve_address(&value);
-                if let Some(tab) = self.active_tab_mut() {
-                    if let Err(error) = tab.view.load_url(&url) {
-                        eprintln!("Cannot load {url}: {error}");
-                    }
-                    tab.url = url;
-                    tab.loading = true;
-                }
-                self.panel = None;
-                self.resize();
+                self.navigate_active(resolve_address(&value));
             }
             Command::NewTab => {
                 #[cfg(target_os = "macos")]
@@ -451,17 +603,23 @@ impl Browser {
             Command::CloseTab { id } => self.close_tab(id),
             Command::Back => {
                 if let Some(tab) = self.active_tab() {
-                    let _ = tab.view.go_back();
+                    if let Some(view) = &tab.view {
+                        let _ = view.go_back();
+                    }
                 }
             }
             Command::Forward => {
                 if let Some(tab) = self.active_tab() {
-                    let _ = tab.view.go_forward();
+                    if let Some(view) = &tab.view {
+                        let _ = view.go_forward();
+                    }
                 }
             }
             Command::Reload => {
                 if let Some(tab) = self.active_tab() {
-                    let _ = tab.view.reload();
+                    if let Some(view) = &tab.view {
+                        let _ = view.reload();
+                    }
                 }
             }
             Command::ToggleBookmark => {
@@ -481,14 +639,7 @@ impl Browser {
                 self.resize();
             }
             Command::OpenSaved { url } => {
-                let url = resolve_address(&url);
-                if let Some(tab) = self.active_tab_mut() {
-                    let _ = tab.view.load_url(&url);
-                    tab.url = url;
-                    tab.loading = true;
-                }
-                self.panel = None;
-                self.resize();
+                self.navigate_active(resolve_address(&url));
             }
             Command::ClearHistory => {
                 self.data.history.clear();
@@ -511,13 +662,18 @@ impl Browser {
             }
             Command::SwitchWorkspace { id } => {
                 if self.data.workspaces.iter().any(|space| space.id == id) {
-                    self.active_workspace = id;
-                    if let Some(tab) = self.tabs.iter().find(|tab| tab.workspace == id) {
-                        self.active = tab.id;
-                        self.panel = None;
-                        self.resize();
-                    } else if let Err(error) = self.new_tab("about:blank") {
-                        eprintln!("Cannot open workspace tab: {error}");
+                    if let Some(tab_id) = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.workspace == id)
+                        .map(|tab| tab.id)
+                    {
+                        self.switch_tab(tab_id);
+                    } else {
+                        self.active_workspace = id;
+                        if let Err(error) = self.new_tab("about:blank") {
+                            eprintln!("Cannot open workspace tab: {error}");
+                        }
                     }
                 }
             }
@@ -560,26 +716,39 @@ impl Browser {
             #[cfg(target_os = "macos")]
             BrowserEvent::Menu(event) => self.handle_menu(event),
             BrowserEvent::Command(command) => self.handle_command(command),
-            BrowserEvent::PageStarted(id, url) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            BrowserEvent::PageStarted(id, generation, url) => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == id && tab.generation == generation && tab.view.is_some())
+                {
                     tab.url = url;
                     tab.loading = true;
                 }
                 self.resize();
                 self.refresh();
             }
-            BrowserEvent::PageFinished(id, url) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            BrowserEvent::PageFinished(id, generation, url) => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == id && tab.generation == generation && tab.view.is_some())
+                {
                     tab.url = url.clone();
                     tab.loading = false;
                     self.data.visit(&url, &tab.title);
                     self.save();
                 }
+                self.reap_tabs();
                 self.resize();
                 self.refresh();
             }
-            BrowserEvent::TitleChanged(id, title) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            BrowserEvent::TitleChanged(id, generation, title) => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == id && tab.generation == generation && tab.view.is_some())
+                {
                     tab.title = if title.trim().is_empty() {
                         if tab.url == "about:blank" {
                             "New tab".into()
@@ -677,6 +846,25 @@ impl Browser {
     }
 
     fn save(&mut self) {
+        if self.save_due.is_none() {
+            self.save_due = Some(Instant::now() + Duration::from_millis(500));
+        }
+    }
+
+    pub(crate) fn save_deadline(&self) -> Option<Instant> {
+        self.save_due
+    }
+
+    pub(crate) fn flush_save_if_due(&mut self) {
+        if self.save_due.is_some_and(|due| Instant::now() >= due) {
+            self.flush_save();
+        }
+    }
+
+    pub(crate) fn flush_save(&mut self) {
+        if self.save_due.take().is_none() {
+            return;
+        }
         self.data.active_workspace = self.active_workspace;
         self.data.session_tabs = self
             .tabs
@@ -686,6 +874,11 @@ impl Browser {
                 workspace: tab.workspace,
             })
             .collect();
+        self.data.active_tab_index = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active)
+            .unwrap_or(0);
         if let Err(error) = self.data.save(&self.data_path) {
             eprintln!("Cannot save browser data: {error}");
         }
@@ -731,19 +924,36 @@ impl Browser {
                     url: &tab.url,
                     title: &tab.title,
                     loading: tab.loading,
+                    sleeping: tab.view.is_none() && tab.url != "about:blank",
                 })
                 .collect(),
             workspaces: &self.data.workspaces,
             active: self.active,
             active_workspace: self.active_workspace,
-            bookmarks: &self.data.bookmarks,
-            history: &self.data.history,
-            downloads: &self.downloads,
+            bookmarks: if self.panel.as_deref() == Some("bookmarks") {
+                &self.data.bookmarks
+            } else {
+                &[]
+            },
+            history: if self.panel.as_deref() == Some("history") {
+                &self.data.history
+            } else {
+                &[]
+            },
+            downloads: if self.panel.as_deref() == Some("downloads") {
+                &self.downloads
+            } else {
+                &[]
+            },
             panel: self.panel.as_deref(),
             bookmarked: active
                 .is_some_and(|tab| self.data.bookmarks.iter().any(|entry| entry.url == tab.url)),
-            can_go_back: active.is_some_and(|tab| tab.view.can_go_back().unwrap_or(false)),
-            can_go_forward: active.is_some_and(|tab| tab.view.can_go_forward().unwrap_or(false)),
+            can_go_back: active
+                .and_then(|tab| tab.view.as_ref())
+                .is_some_and(|view| view.can_go_back().unwrap_or(false)),
+            can_go_forward: active
+                .and_then(|tab| tab.view.as_ref())
+                .is_some_and(|view| view.can_go_forward().unwrap_or(false)),
             has_photo: self.photo_path.exists(),
             photo_version: self.photo_version,
             photo_focus_x: self.data.photo_focus_x,
@@ -790,7 +1000,19 @@ fn photo_mime(bytes: &[u8]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjacent_tab_index, photo_mime, shortcut_tab_index};
+    use super::{adjacent_tab_index, eviction_score, photo_mime, shortcut_tab_index};
+    use std::time::Duration;
+
+    #[test]
+    fn frequently_used_tabs_get_more_time_before_eviction() {
+        assert_eq!(eviction_score(Duration::from_secs(900), 1), 900_000);
+        assert_eq!(eviction_score(Duration::from_secs(900), 4), 225_000);
+        assert_eq!(eviction_score(Duration::from_secs(3600), 4), 900_000);
+        assert!(
+            eviction_score(Duration::from_millis(120), 1)
+                > eviction_score(Duration::from_millis(80), 1)
+        );
+    }
 
     #[test]
     fn numbered_tabs_follow_browser_conventions() {
