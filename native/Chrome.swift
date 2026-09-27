@@ -70,7 +70,7 @@ private struct ChromeSnapshot: Decodable {
     }
 
     var wallpaperVisible: Bool {
-        activeTab?.url == "about:blank" && snapshot?.panel == nil && wallpaper != nil
+        wallpaper != nil
     }
 
     func send(_ type: String, _ values: [String: Any] = [:]) {

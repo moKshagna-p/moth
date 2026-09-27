@@ -19,6 +19,7 @@ pub(crate) fn run() {
     let window = WindowBuilder::new()
         .with_title("Moth")
         .with_inner_size(LogicalSize::new(1200.0, 800.0))
+        .with_min_inner_size(LogicalSize::new(640.0, 480.0))
         .build(&event_loop)
         .expect("Cannot create browser window");
     let mut browser =
