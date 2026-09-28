@@ -63,6 +63,21 @@ struct Tab {
     loading: bool,
 }
 
+fn record_tab_switch(tabs: &mut [Tab], previous: u64, next: u64, now: Instant) {
+    if previous == next {
+        return;
+    }
+    for tab in tabs {
+        if tab.id == previous || tab.id == next {
+            // Time spent reading the foreground tab is not idle time.
+            tab.last_used = now;
+        }
+        if tab.id == next {
+            tab.activations = tab.activations.saturating_add(1);
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct TabState<'a> {
     id: u64,
@@ -291,11 +306,12 @@ impl Browser {
             visible: false,
             generation: 1,
             last_used: Instant::now(),
-            activations: 1,
+            activations: 0,
             url: url.into(),
             title: "New tab".into(),
             loading: url != "about:blank",
         });
+        record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
         self.panel = None;
         self.resize();
@@ -403,8 +419,7 @@ impl Browser {
             self.tabs[index].generation = generation;
             self.tabs[index].loading = true;
         }
-        self.tabs[index].last_used = Instant::now();
-        self.tabs[index].activations = self.tabs[index].activations.saturating_add(1);
+        record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
         self.active_workspace = self.tabs[index].workspace;
         self.panel = None;
@@ -454,6 +469,7 @@ impl Browser {
         self.tabs[index].last_used = Instant::now();
         self.panel = None;
         self.resize();
+        self.reap_tabs();
     }
 
     pub(crate) fn reap_tabs(&mut self) {
@@ -731,6 +747,9 @@ impl Browser {
                 {
                     tab.url = url;
                     tab.loading = true;
+                    self.save();
+                } else {
+                    return;
                 }
                 self.resize();
                 self.refresh();
@@ -745,6 +764,8 @@ impl Browser {
                     tab.loading = false;
                     self.data.visit(&url, &tab.title);
                     self.save();
+                } else {
+                    return;
                 }
                 self.reap_tabs();
                 self.resize();
@@ -774,6 +795,8 @@ impl Browser {
                         entry.title = tab.title.clone();
                         self.save();
                     }
+                } else {
+                    return;
                 }
                 self.refresh();
             }
@@ -1007,8 +1030,52 @@ fn photo_mime(bytes: &[u8]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjacent_tab_index, eviction_score, photo_mime, shortcut_tab_index};
-    use std::time::Duration;
+    use super::{
+        adjacent_tab_index, eviction_score, photo_mime, record_tab_switch, shortcut_tab_index, Tab,
+        IDLE_TAB_AGE,
+    };
+    use std::time::{Duration, Instant};
+
+    fn tab(id: u64, last_used: Instant) -> Tab {
+        Tab {
+            id,
+            workspace: 1,
+            view: None,
+            visible: false,
+            generation: 0,
+            last_used,
+            activations: 1,
+            url: "about:blank".into(),
+            title: "New tab".into(),
+            loading: false,
+        }
+    }
+
+    #[test]
+    fn leaving_a_long_read_starts_a_fresh_idle_period() {
+        let opened = Instant::now();
+        let switched = opened + Duration::from_secs(7200);
+        let mut tabs = vec![tab(1, opened), tab(2, opened), tab(3, opened)];
+        record_tab_switch(&mut tabs, 1, 2, switched);
+        assert_eq!(tabs[0].last_used, switched);
+        assert_eq!(tabs[1].last_used, switched);
+        assert_eq!(tabs[2].last_used, opened);
+        assert_eq!(tabs[0].activations, 1);
+        assert_eq!(tabs[1].activations, 2);
+        assert!(
+            eviction_score(switched - tabs[0].last_used, tabs[0].activations)
+                < IDLE_TAB_AGE.as_millis()
+        );
+    }
+
+    #[test]
+    fn reselecting_active_tab_does_not_inflate_frequency() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now)];
+        record_tab_switch(&mut tabs, 1, 1, now + Duration::from_secs(60));
+        assert_eq!(tabs[0].activations, 1);
+        assert_eq!(tabs[1].activations, 1);
+    }
 
     #[test]
     fn frequently_used_tabs_get_more_time_before_eviction() {
