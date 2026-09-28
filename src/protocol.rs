@@ -2,37 +2,113 @@
 use muda::MenuEvent;
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Command {
-    Navigate { value: String },
+    Navigate {
+        value: String,
+    },
+    NewWindow {
+        private: bool,
+    },
+    Find,
+    Zoom {
+        delta: i8,
+    },
+    Print,
+    Settings,
+    SetSettings {
+        settings: crate::data::Settings,
+    },
+    ClearSiteData,
+    DefaultBrowser,
+    DuplicateTab {
+        id: u64,
+    },
+    TogglePin {
+        id: u64,
+    },
+    ReorderTab {
+        id: u64,
+        before: u64,
+    },
+    CloseOtherTabs {
+        id: u64,
+    },
+    SplitTab {
+        id: u64,
+    },
+    CloseSplit,
+    FocusPane {
+        id: u64,
+    },
+    PageError {
+        id: u64,
+        generation: u64,
+        message: String,
+    },
+    DismissError,
+    DownloadUpdate {
+        download: crate::data::Download,
+    },
+    DownloadAction {
+        id: String,
+        action: String,
+    },
     NewTab,
-    OpenNewTab { value: String },
+    OpenNewTab {
+        value: String,
+    },
     OpenBlankTab,
-    SetNewTabPhoto { path: String },
-    SetSidebarWidth { width: u16 },
-    SetPhotoPosition { x: u8, y: u8 },
+    SetNewTabPhoto {
+        path: String,
+    },
+    SetSidebarWidth {
+        width: u16,
+    },
+    SetPhotoPosition {
+        x: u8,
+        y: u8,
+    },
     RemoveNewTabPhoto,
     ReopenClosedTab,
-    SwitchTab { id: u64 },
-    SwitchTabByIndex { index: usize },
+    SwitchTab {
+        id: u64,
+    },
+    SwitchTabByIndex {
+        index: usize,
+    },
     NextTab,
     PreviousTab,
-    CloseTab { id: u64 },
+    CloseTab {
+        id: u64,
+    },
     Back,
     Forward,
     Reload,
     ToggleBookmark,
-    ShowPanel { panel: Option<String> },
-    OpenSaved { url: String },
+    ShowPanel {
+        panel: Option<String>,
+    },
+    OpenSaved {
+        url: String,
+    },
     ClearHistory,
     NewWorkspace,
-    SwitchWorkspace { id: u64 },
-    RenameWorkspace { name: String },
-    MoveTab { id: u64, workspace: u64 },
+    SwitchWorkspace {
+        id: u64,
+    },
+    RenameWorkspace {
+        name: String,
+    },
+    MoveTab {
+        id: u64,
+        workspace: u64,
+    },
 }
 
 pub(crate) enum BrowserEvent {
+    Routed(u64, Box<BrowserEvent>),
     #[cfg(target_os = "macos")]
     Menu(MenuEvent),
     Command(Command),
@@ -44,4 +120,19 @@ pub(crate) enum BrowserEvent {
     OpenTab(String),
     DownloadStarted(String, String),
     DownloadFinished(String, bool),
+}
+
+#[derive(Clone)]
+pub(crate) struct BrowserProxy {
+    pub id: u64,
+    pub proxy: tao::event_loop::EventLoopProxy<BrowserEvent>,
+}
+impl BrowserProxy {
+    pub fn send_event(
+        &self,
+        event: BrowserEvent,
+    ) -> Result<(), tao::event_loop::EventLoopClosed<BrowserEvent>> {
+        self.proxy
+            .send_event(BrowserEvent::Routed(self.id, Box::new(event)))
+    }
 }

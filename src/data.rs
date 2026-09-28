@@ -20,12 +20,18 @@ pub struct Workspace {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionTab {
+    #[serde(default)]
+    pub pinned: bool,
     pub url: String,
     pub workspace: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserData {
+    #[serde(default)]
+    pub settings: Settings,
+    #[serde(default)]
+    pub downloads: Vec<Download>,
     pub bookmarks: Vec<Entry>,
     pub history: Vec<Entry>,
     #[serde(default = "default_workspaces")]
@@ -44,7 +50,9 @@ pub struct BrowserData {
     pub sidebar_width: u16,
 }
 
-fn default_sidebar_width() -> u16 { 220 }
+fn default_sidebar_width() -> u16 {
+    220
+}
 
 fn default_photo_focus() -> u8 {
     50
@@ -64,6 +72,8 @@ fn default_workspaces() -> Vec<Workspace> {
 impl Default for BrowserData {
     fn default() -> Self {
         Self {
+            settings: Settings::default(),
+            downloads: Vec::new(),
             bookmarks: Vec::new(),
             history: Vec::new(),
             workspaces: default_workspaces(),
@@ -79,9 +89,13 @@ impl Default for BrowserData {
 
 impl BrowserData {
     pub fn load(path: &Path) -> Self {
-        let mut data: Self = fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        let read = |p: &Path| {
+            fs::read(p)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
+        };
+        let mut data = read(path)
+            .or_else(|| read(&path.with_extension("json.bak")))
             .unwrap_or_default();
         if data.workspaces.is_empty() {
             data.workspaces = default_workspaces();
@@ -105,6 +119,14 @@ impl BrowserData {
         }
         let temp = path.with_extension("json.tmp");
         fs::write(&temp, serde_json::to_vec_pretty(self)?)?;
+        // Never replace the last good backup with corrupt input.
+        if let Ok(bytes) = fs::read(path) {
+            if serde_json::from_slice::<Self>(&bytes).is_ok() {
+                fs::write(path.with_extension("json.bak"), bytes)?;
+            } else {
+                fs::write(path.with_extension("json.corrupt"), bytes)?;
+            }
+        }
         fs::rename(temp, path)
     }
 
@@ -150,6 +172,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn corrupt_state_recovers_backup_without_destroying_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "moth-recovery-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("state.json");
+        let mut data = BrowserData::default();
+        data.toggle_bookmark("https://example.com", "Kept");
+        data.save(&path).unwrap();
+        data.settings.search_engine = "bing".into();
+        data.save(&path).unwrap();
+        fs::write(&path, b"interrupted write").unwrap();
+        let recovered = BrowserData::load(&path);
+        assert_eq!(recovered.bookmarks[0].title, "Kept");
+        assert_eq!(recovered.settings.search_engine, "google");
+        recovered.save(&path).unwrap();
+        assert_eq!(
+            fs::read(path.with_extension("json.corrupt")).unwrap(),
+            b"interrupted write"
+        );
+        assert_eq!(BrowserData::load(&path).bookmarks.len(), 1);
+        let backup: BrowserData =
+            serde_json::from_slice(&fs::read(path.with_extension("json.bak")).unwrap()).unwrap();
+        assert_eq!(backup.bookmarks.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_sessions_default_to_unpinned_and_safe_settings() {
+        let data: BrowserData = serde_json::from_str(r#"{"bookmarks":[],"history":[],"session_tabs":[{"url":"https://example.com","workspace":1}]}"#).unwrap();
+        assert!(!data.session_tabs[0].pinned);
+        assert!(data.settings.site_permissions.is_empty());
+        assert!(data.settings.restore_session);
+        assert!(data.downloads.is_empty());
+    }
+
+    #[test]
     fn bookmarks_toggle_and_history_is_bounded() {
         let mut data = BrowserData::default();
         data.toggle_bookmark("https://example.com", "Example");
@@ -164,9 +227,12 @@ mod tests {
 
     #[test]
     fn sidebar_width_survives_serialization() {
-        let mut state = BrowserData::default();
-        state.sidebar_width = 310;
-        let restored: BrowserData = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let state = BrowserData {
+            sidebar_width: 310,
+            ..BrowserData::default()
+        };
+        let restored: BrowserData =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(restored.sidebar_width, 310);
     }
 
@@ -177,4 +243,35 @@ mod tests {
         assert_eq!(state.active_tab_index, 0);
         assert_eq!(state.sidebar_width, 220);
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub search_engine: String,
+    pub download_directory: String,
+    pub restore_session: bool,
+    pub appearance: String,
+    pub site_permissions: std::collections::BTreeMap<String, String>,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            search_engine: "google".into(),
+            download_directory: String::new(),
+            restore_session: true,
+            appearance: "system".into(),
+            site_permissions: Default::default(),
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Download {
+    pub id: String,
+    pub url: String,
+    pub filename: String,
+    pub path: String,
+    pub complete: bool,
+    pub success: bool,
+    pub progress: f64,
 }

@@ -41,7 +41,25 @@ function renderPanel() {
     const empty = document.createElement('p'); empty.className = 'empty';
     empty.textContent = state.panel === 'bookmarks' ? 'Bookmark a page to keep it here.' : state.panel === 'history' ? 'Pages you visit will appear here.' : 'Downloads will appear here.';
     list.append(empty);
-  } else for (const item of items) list.append(savedRow(item, true));
+  } else for (const item of items) {
+    if (state.panel !== 'downloads') { list.append(savedRow(item, true)); continue; }
+    const row = document.createElement('div');
+    row.className = 'download-row';
+    const description = savedRow(item, false);
+    description.disabled = true;
+    row.append(description);
+    if (!item.complete) {
+      const progress = document.createElement('progress');
+      progress.max = 1;
+      if (item.progress > 0) progress.value = item.progress;
+      progress.setAttribute('aria-label', `Downloading ${item.filename}`);
+      row.append(progress, makeButton('Cancel', '', () => send({ type: 'download_action', id: item.id, action: 'cancel' })));
+    } else if (item.success) {
+      row.append(makeButton('Open', '', () => send({ type: 'download_action', id: item.id, action: 'open' })),
+        makeButton('Show in Finder', '', () => send({ type: 'download_action', id: item.id, action: 'reveal' })));
+    }
+    list.append(row);
+  }
   panel.append(list);
 }
 window.renderState = next => {

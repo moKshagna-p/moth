@@ -9,27 +9,31 @@ private let accent = Color(red: 0.29, green: 0.39, blue: 0.31)
 private let sidebarColor = Color(red: 0.92, green: 0.93, blue: 0.90)
 private let toolbarColor = Color(red: 0.97, green: 0.97, blue: 0.95)
 
-private struct TabInfo: Decodable, Identifiable {
+struct TabInfo: Decodable, Identifiable {
     let id: UInt64
     let url: String
     let title: String
     let favicon: String?
     let loading: Bool
     let sleeping: Bool
+    let pinned: Bool
     let workspace: UInt64
 }
 
-private struct WorkspaceInfo: Decodable, Identifiable {
+struct WorkspaceInfo: Decodable, Identifiable {
     let id: UInt64
     let name: String
 }
 
-private struct ChromeSnapshot: Decodable {
+struct ChromeSnapshot: Decodable {
     let tabs: [TabInfo]
     let workspaces: [WorkspaceInfo]
     let active: UInt64
     let active_workspace: UInt64
     let panel: String?
+    let private_mode: Bool
+    let error: String?
+    let settings: BrowserSettings
     let bookmarked: Bool
     let can_go_back: Bool
     let can_go_forward: Bool
@@ -41,7 +45,7 @@ private struct ChromeSnapshot: Decodable {
     let site_color: [UInt8]?
 }
 
-@MainActor private final class ChromeModel: ObservableObject {
+@MainActor final class ChromeModel: ObservableObject {
     @Published var snapshot: ChromeSnapshot?
     @Published var swipeWorkspaces = UserDefaults.standard.object(forKey: "swipeWorkspaces") as? Bool ?? true {
         didSet { UserDefaults.standard.set(swipeWorkspaces, forKey: "swipeWorkspaces") }
@@ -67,6 +71,8 @@ private struct ChromeSnapshot: Decodable {
     @Published var wallpaper: NSImage?
     var photoPath = ""
     private var loadedPhotoVersion: UInt64?
+    weak var bridge: ChromeBridge?
+    var windowID: UInt64 = 0
     var editingAddress = false
     var callback: (@convention(c) (UnsafePointer<CChar>?) -> Void)?
 
@@ -78,7 +84,7 @@ private struct ChromeSnapshot: Decodable {
               let next = try? JSONDecoder().decode(ChromeSnapshot.self, from: data) else { return }
         let cropChanged = snapshot?.photo_focus_x != next.photo_focus_x || snapshot?.photo_focus_y != next.photo_focus_y
         let photoChanged = next.photo_version != loadedPhotoVersion
-        let themeChanged = snapshot?.site_color != next.site_color
+        let themeChanged = snapshot?.site_color != next.site_color || snapshot?.settings.appearance != next.settings.appearance
         sidebarWidth = CGFloat(next.sidebar_width ?? 220)
         snapshot = next
         if next.photo_version != loadedPhotoVersion {
@@ -109,8 +115,10 @@ private struct ChromeSnapshot: Decodable {
     }
 
     private func updateContrast() {
+        if snapshot?.settings.appearance == "dark" { chromeScheme = .dark; return }
+        if snapshot?.settings.appearance == "light" { chromeScheme = .light; return }
         guard let sample = photoSample, let wallpaper else {
-            chromeScheme = .light
+            chromeScheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             return
         }
         let frame = wallpaperFrame(image: wallpaper.size, window: windowSize,
@@ -146,6 +154,7 @@ private struct ChromeSnapshot: Decodable {
         guard let callback else { return }
         var message = values
         message["type"] = type
+        message["window_id"] = windowID
         guard let data = try? JSONSerialization.data(withJSONObject: message),
               let text = String(data: data, encoding: .utf8) else { return }
         text.withCString { callback($0) }
@@ -159,12 +168,12 @@ private struct ChromeSnapshot: Decodable {
     func showPalette(_ mode: PaletteMode) {
         paletteQuery = ""
         paletteMode = mode
-        ChromeBridge.shared.setPaletteVisible(true)
+        bridge?.setPaletteVisible(true)
         DispatchQueue.main.async { self.paletteFocus += 1 }
     }
     func closePalette() {
         paletteMode = nil
-        ChromeBridge.shared.setPaletteVisible(false)
+        bridge?.setPaletteVisible(false)
     }
     func choosePhoto() {
         let picker = NSOpenPanel()
@@ -180,7 +189,7 @@ private struct ChromeSnapshot: Decodable {
     }
 }
 
-private enum PaletteMode: Equatable { case newTab, switcher }
+enum PaletteMode: Equatable { case newTab, switcher }
 
 private struct SymbolButton: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -426,6 +435,7 @@ private struct SidebarView: View {
                             .lineLimit(1)
                     }
                     Spacer(minLength: 0)
+                    if tab.pinned { Image(systemName: "pin.fill").accessibilityLabel("Pinned") }
                     if tab.loading { ProgressView().controlSize(.mini) }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -443,9 +453,20 @@ private struct SidebarView: View {
             .foregroundStyle(model.chromeMuted)
             .opacity(0.85)
             .help("Close Tab")
+            .accessibilityLabel("Close " + tab.title)
             .padding(.trailing, 6)
         }
         .contextMenu {
+            Button(tab.pinned ? "Unpin Tab" : "Pin Tab") { model.send("toggle_pin", ["id": tab.id]) }
+            Button("Duplicate Tab") { model.send("duplicate_tab", ["id": tab.id]) }
+            Button("Close Other Tabs") { model.send("close_other_tabs", ["id": tab.id]) }
+            Button("Open Beside Current Tab") { model.send("split_tab", ["id": tab.id]) }
+            Button("Move Up") {
+                let tabs = model.snapshot?.tabs.filter { $0.workspace == tab.workspace } ?? []
+                if let index = tabs.firstIndex(where: { $0.id == tab.id }), index > 0 {
+                    model.send("reorder_tab", ["id": tab.id, "before": tabs[index - 1].id])
+                }
+            }
             Button("Close Tab") { model.send("close_tab", ["id": tab.id]) }
             Menu("Move to Workspace") {
                 ForEach(model.snapshot?.workspaces.filter { $0.id != tab.workspace } ?? []) { workspace in
@@ -453,12 +474,21 @@ private struct SidebarView: View {
                 }
             }
         }
-        return row.glassEffect(selected ? .regular.interactive() : .identity, in: Capsule())
+        return row.draggable(String(tab.id))
+            .dropDestination(for: String.self) { ids, _ in
+                guard let value = ids.first, let id = UInt64(value), id != tab.id else { return false }
+                model.send("reorder_tab", ["id": id, "before": tab.id]); return true
+            }.glassEffect(selected ? .regular.interactive() : .identity, in: Capsule())
     }
 
     private var workspaceSwitcher: some View {
         HStack(spacing: 10) {
             Menu {
+                if model.snapshot?.private_mode == true { Text("Private Window — browsing is not saved") }
+                Button("Settings…") { model.send("settings") }
+                Button("New Window") { model.send("new_window", ["private": false]) }
+                Button("New Private Window") { model.send("new_window", ["private": true]) }
+                Button("Close Split View") { model.send("close_split") }
                 Button("New Tab") { model.showNewTab() }
                 Divider()
                 ForEach(model.snapshot?.workspaces ?? []) { workspace in
@@ -468,7 +498,7 @@ private struct SidebarView: View {
                 Toggle("Website color highlights", isOn: $model.matchSiteColors)
                 Button(model.customizingWallpaper ? "Hide wallpaper controls" : "Customize wallpaper") {
                     model.customizingWallpaper.toggle()
-                    ChromeBridge.shared.updatePhotoControls()
+                    model.bridge?.updatePhotoControls()
                 }
                 Button("New Workspace") { model.send("new_workspace") }
                 Button("Rename Workspace") {
@@ -757,17 +787,21 @@ private struct PhotoPositionEditor: View {
     }
 }
 
-@MainActor private final class ChromeBridge {
-    static let shared = ChromeBridge()
+@MainActor final class ChromeBridge {
+    static var instances: [UInt64: ChromeBridge] = [:]
+    static func instance(_ id: UInt64) -> ChromeBridge { instances[id]! }
     let model = ChromeModel()
     var parent: NSView?
-    var chrome: ChromeHostingView?
-    var palette: NSHostingView<PaletteOverlay>?
-    var photoControls: NSHostingView<PhotoControls>?
+    private var chrome: ChromeHostingView?
+    private var palette: NSHostingView<PaletteOverlay>?
+    private var photoControls: NSHostingView<PhotoControls>?
     private var escapeMonitor: Any?
+
+    deinit { if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) } }
 
     func install(_ parent: NSView, callback: @escaping @convention(c) (UnsafePointer<CChar>?) -> Void, photoPath: String) {
         self.parent = parent
+        model.bridge = self
         model.callback = callback
         model.photoPath = photoPath
         let chrome = ChromeHostingView(rootView: ChromeSurface(model: model))
@@ -787,7 +821,7 @@ private struct PhotoPositionEditor: View {
         self.photoControls = photoControls
         if escapeMonitor == nil {
             escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, self.model.paletteMode != nil, event.keyCode == 53 else { return event }
+                guard let self, event.window == self.parent?.window, self.model.paletteMode != nil, event.keyCode == 53 else { return event }
                 self.model.closePalette()
                 return nil
             }
@@ -795,6 +829,11 @@ private struct PhotoPositionEditor: View {
         resize(parent.bounds.width, parent.bounds.height)
     }
 
+    func updateAppearance() {
+        let preference = model.snapshot?.settings.appearance ?? "system"
+        parent?.window?.appearance = preference == "system" ? nil : NSAppearance(named: preference == "dark" ? .darkAqua : .aqua)
+        chrome?.appearance = NSAppearance(named: model.chromeScheme == .dark ? .darkAqua : .aqua)
+    }
     func resize(_ width: CGFloat, _ height: CGFloat) {
         guard let parent else { return }
         model.windowSize = CGSize(width: width, height: height)
@@ -816,7 +855,7 @@ private struct PhotoPositionEditor: View {
 
     func updatePhotoControls() {
         guard let parent, let photoControls else { return }
-        let show = model.customizingWallpaper && model.activeTab?.url == "about:blank" && model.snapshot?.panel == nil
+        let show = model.snapshot?.private_mode != true && model.customizingWallpaper && model.activeTab?.url == "about:blank" && model.snapshot?.panel == nil
         if show && photoControls.isHidden {
             photoControls.removeFromSuperview()
             parent.addSubview(photoControls, positioned: .above, relativeTo: nil)
@@ -825,41 +864,46 @@ private struct PhotoPositionEditor: View {
     }
 }
 
+
 @_cdecl("moth_install_chrome")
-func moth_install_chrome(_ parent: UnsafeMutableRawPointer?, _ callback: @escaping @convention(c) (UnsafePointer<CChar>?) -> Void, _ photoPath: UnsafePointer<CChar>?) {
+func moth_install_chrome(_ id: UInt64, _ parent: UnsafeMutableRawPointer?, _ callback: @escaping @convention(c) (UnsafePointer<CChar>?) -> Void, _ photoPath: UnsafePointer<CChar>?) {
     guard let parent else { return }
     MainActor.assumeIsolated {
-        ChromeBridge.shared.install(Unmanaged<NSView>.fromOpaque(parent).takeUnretainedValue(), callback: callback, photoPath: photoPath.map(String.init(cString:)) ?? "")
+        let bridge = ChromeBridge()
+        bridge.model.windowID = id
+        ChromeBridge.instances[id] = bridge
+        bridge.install(Unmanaged<NSView>.fromOpaque(parent).takeUnretainedValue(), callback: callback, photoPath: photoPath.map(String.init(cString:)) ?? "")
     }
 }
-
-@_cdecl("moth_resize_chrome")
-func moth_resize_chrome(_ width: Double, _ height: Double) {
-    MainActor.assumeIsolated { ChromeBridge.shared.resize(width, height) }
+@_cdecl("moth_remove_chrome")
+func moth_remove_chrome(_ id: UInt64) {
+    MainActor.assumeIsolated { BrowserFeatures.removeWindow(id); ChromeBridge.instances.removeValue(forKey: id) }
 }
-
+@_cdecl("moth_resize_chrome")
+func moth_resize_chrome(_ id: UInt64, _ width: Double, _ height: Double) {
+    MainActor.assumeIsolated { ChromeBridge.instance(id).resize(width, height) }
+}
 @_cdecl("moth_update_chrome")
-func moth_update_chrome(_ json: UnsafePointer<CChar>?) {
+func moth_update_chrome(_ id: UInt64, _ json: UnsafePointer<CChar>?) {
     guard let json else { return }
     let text = String(cString: json)
     MainActor.assumeIsolated {
-        ChromeBridge.shared.model.update(text)
-        ChromeBridge.shared.chrome?.appearance = NSAppearance(named: ChromeBridge.shared.model.chromeScheme == .dark ? .darkAqua : .aqua)
-        ChromeBridge.shared.updatePhotoControls()
+        let bridge = ChromeBridge.instance(id)
+        bridge.model.update(text)
+        bridge.updateAppearance()
+        bridge.updatePhotoControls()
+        BrowserFeatures.update(id, model: bridge.model)
     }
 }
-
 @_cdecl("moth_focus_address")
-func moth_focus_address() {
-    MainActor.assumeIsolated { ChromeBridge.shared.model.focusAddress() }
+func moth_focus_address(_ id: UInt64) {
+    MainActor.assumeIsolated { ChromeBridge.instance(id).model.focusAddress() }
 }
-
 @_cdecl("moth_focus_switcher")
-func moth_focus_switcher() {
-    MainActor.assumeIsolated { ChromeBridge.shared.model.showSwitcher() }
+func moth_focus_switcher(_ id: UInt64) {
+    MainActor.assumeIsolated { ChromeBridge.instance(id).model.showSwitcher() }
 }
-
 @_cdecl("moth_focus_new_tab")
-func moth_focus_new_tab() {
-    MainActor.assumeIsolated { ChromeBridge.shared.model.showNewTab() }
+func moth_focus_new_tab(_ id: UInt64) {
+    MainActor.assumeIsolated { ChromeBridge.instance(id).model.showNewTab() }
 }

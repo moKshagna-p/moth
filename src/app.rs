@@ -1,4 +1,7 @@
-use crate::{browser::Browser, protocol::BrowserEvent};
+use crate::{
+    browser::Browser,
+    protocol::{BrowserEvent, BrowserProxy, Command},
+};
 #[cfg(target_os = "macos")]
 use muda::{
     accelerator::{Accelerator, Code, Modifiers},
@@ -14,49 +17,221 @@ use tao::{
 
 pub(crate) fn run() {
     let event_loop = EventLoopBuilder::<BrowserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
     #[cfg(target_os = "macos")]
-    let _menu = setup_menu(event_loop.create_proxy());
-    let window = WindowBuilder::new()
-        .with_title("Moth")
-        .with_inner_size(LogicalSize::new(1200.0, 800.0))
-        .with_min_inner_size(LogicalSize::new(640.0, 480.0))
-        .build(&event_loop)
-        .expect("Cannot create browser window");
-    let mut browser =
-        Browser::new(window, event_loop.create_proxy()).expect("Cannot start browser");
+    let _menu = setup_menu(proxy.clone());
+    let window = make_window(&event_loop);
+    let browser = Browser::new(
+        window,
+        BrowserProxy {
+            id: 1,
+            proxy: proxy.clone(),
+        },
+        false,
+        None,
+    )
+    .expect("Cannot start browser");
+    let mut windows = std::collections::BTreeMap::from([(1_u64, browser)]);
+    let mut focused = 1;
+    let mut next_id = 2;
     let mut next_reap = Instant::now() + Duration::from_secs(60);
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
+        let mut routed = None;
+        let mut create = None;
+        let mut opened_urls = Vec::new();
         match event {
             Event::WindowEvent {
+                window_id,
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                browser.flush_save();
-                *control_flow = ControlFlow::Exit;
-                return;
+                if let Some(key) = windows
+                    .iter()
+                    .find(|(_, b)| b.window.id() == window_id)
+                    .map(|(k, _)| *k)
+                {
+                    persist(&mut windows, true);
+                    #[cfg(target_os = "macos")]
+                    crate::native_chrome::remove(key);
+                    windows.remove(&key);
+                    if windows.is_empty() {
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
+                    focused = *windows.keys().next().unwrap();
+                }
             }
             Event::LoopDestroyed => {
-                browser.flush_save();
+                persist(&mut windows, true);
                 return;
             }
             Event::WindowEvent {
-                event: WindowEvent::Resized(_),
-                ..
-            } => browser.resize(),
-            Event::UserEvent(event) => browser.handle_event(event),
+                window_id, event, ..
+            } => {
+                if let Some((key, browser)) =
+                    windows.iter_mut().find(|(_, b)| b.window.id() == window_id)
+                {
+                    match event {
+                        WindowEvent::Resized(_) => browser.resize(),
+                        WindowEvent::Focused(true) => focused = *key,
+                        _ => {}
+                    }
+                }
+            }
+            Event::Opened { urls } => {
+                opened_urls = urls
+                    .into_iter()
+                    .filter(|u| matches!(u.scheme(), "http" | "https"))
+                    .collect();
+                if !opened_urls.is_empty() && !windows.values().any(|b| !b.private_mode) {
+                    create = Some(false);
+                }
+            }
+            Event::UserEvent(BrowserEvent::Routed(key, event)) => routed = Some((key, *event)),
+            Event::UserEvent(event) => routed = Some((focused, event)),
             _ => {}
         }
+        if let Some((key, event)) = routed {
+            match event {
+                BrowserEvent::Command(Command::NewWindow { private }) => create = Some(private),
+                #[cfg(target_os = "macos")]
+                BrowserEvent::Menu(ref menu)
+                    if menu.id.0 == "new_window" || menu.id.0 == "private_window" =>
+                {
+                    create = Some(menu.id.0 == "private_window")
+                }
+                BrowserEvent::Command(Command::ClearSiteData)
+                    if windows.values().filter(|b| !b.private_mode).count() > 1
+                        && windows.get(&key).is_some_and(|b| !b.private_mode) =>
+                {
+                    if let Some(browser) = windows.get_mut(&key) {
+                        browser.error =
+                            Some("Close other normal windows before clearing website data.".into());
+                        browser.refresh();
+                    }
+                }
+                event => {
+                    if let Some(browser) = windows.get_mut(&key) {
+                        browser.handle_event(event);
+                    }
+                    if let Some(data) = windows
+                        .get(&key)
+                        .filter(|b| !b.private_mode)
+                        .map(|b| b.data.clone())
+                    {
+                        for browser in windows.values_mut() {
+                            browser.sync_data(&data);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(private) = create {
+            let shared = windows
+                .values()
+                .find(|b| !b.private_mode)
+                .map(|b| b.data.clone())
+                .or_else(|| {
+                    windows
+                        .values()
+                        .next()
+                        .map(|b| crate::data::BrowserData::load(&b.data_path))
+                })
+                .unwrap_or_default();
+            let window = make_window(target);
+            match Browser::new(
+                window,
+                BrowserProxy {
+                    id: next_id,
+                    proxy: proxy.clone(),
+                },
+                private,
+                Some(shared),
+            ) {
+                Ok(browser) => {
+                    windows.insert(next_id, browser);
+                    focused = next_id;
+                    next_id += 1;
+                }
+                Err(error) => {
+                    if let Some(browser) = windows.get_mut(&focused) {
+                        browser.error = Some(error.to_string());
+                        browser.refresh();
+                    }
+                }
+            }
+        }
+        if !opened_urls.is_empty() {
+            if let Some(key) = windows
+                .iter()
+                .find(|(_, b)| !b.private_mode)
+                .map(|(k, _)| *k)
+            {
+                let browser = windows.get_mut(&key).unwrap();
+                for url in opened_urls {
+                    browser.handle_event(BrowserEvent::OpenTab(url.to_string()));
+                }
+                browser.window.set_focus();
+                focused = key;
+                let data = browser.data.clone();
+                for browser in windows.values_mut() {
+                    browser.sync_data(&data);
+                }
+            }
+        }
         if Instant::now() >= next_reap {
-            browser.reap_tabs();
+            for browser in windows.values_mut() {
+                browser.reap_tabs();
+            }
             next_reap = Instant::now() + Duration::from_secs(60);
         }
-        browser.flush_save_if_due();
-        *control_flow = ControlFlow::WaitUntil(
-            browser
-                .save_deadline()
-                .map_or(next_reap, |due| due.min(next_reap)),
-        );
+        persist(&mut windows, false);
+        let deadline = windows
+            .values()
+            .filter_map(Browser::save_deadline)
+            .min()
+            .map_or(next_reap, |due| due.min(next_reap));
+        *control_flow = ControlFlow::WaitUntil(deadline);
     });
+}
+
+fn make_window(
+    target: &tao::event_loop::EventLoopWindowTarget<BrowserEvent>,
+) -> tao::window::Window {
+    WindowBuilder::new()
+        .with_title("Moth")
+        .with_inner_size(LogicalSize::new(1200.0, 800.0))
+        .with_min_inner_size(LogicalSize::new(640.0, 480.0))
+        .build(target)
+        .expect("Cannot create browser window")
+}
+
+fn persist(windows: &mut std::collections::BTreeMap<u64, Browser>, force: bool) {
+    if !force
+        && !windows
+            .values()
+            .any(|b| b.save_deadline().is_some_and(|due| due <= Instant::now()))
+    {
+        return;
+    }
+    let Some(primary) = windows.values().find(|b| !b.private_mode) else {
+        for b in windows.values_mut() {
+            b.save_due = None;
+        }
+        return;
+    };
+    let mut data = primary.data.clone();
+    data.session_tabs = windows.values().flat_map(Browser::sessions).collect();
+    data.active_tab_index = primary.active_index();
+    data.active_workspace = primary.active_workspace();
+    let result = data.save(&primary.data_path);
+    for browser in windows.values_mut() {
+        browser.save_due = None;
+        if let Err(ref error) = result {
+            browser.error = Some(format!("Could not save browser data: {error}"));
+            browser.refresh();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -127,12 +302,41 @@ fn setup_menu(proxy: EventLoopProxy<BrowserEvent>) -> Menu {
         Code::KeyJ,
         command | Modifiers::SHIFT,
     );
-    let file =
-        Submenu::with_items("File", true, &[&new_tab, &reopen_tab, &close_tab]).expect("File menu");
+    let new_window = shortcut("new_window", "New Window", Code::KeyN, command);
+    let private_window = shortcut(
+        "private_window",
+        "New Private Window",
+        Code::KeyN,
+        command | Modifiers::SHIFT,
+    );
+    let print = shortcut("print", "Print / Save as PDF…", Code::KeyP, command);
+    let settings = shortcut("settings", "Settings…", Code::Comma, command);
+    let find = shortcut("find", "Find in Page…", Code::KeyF, command);
+    let zoom_in = shortcut("zoom_in", "Zoom In", Code::Equal, command);
+    let zoom_out = shortcut("zoom_out", "Zoom Out", Code::Minus, command);
+    let zoom_reset = shortcut("zoom_reset", "Actual Size", Code::Digit0, command);
+    let file = Submenu::with_items(
+        "File",
+        true,
+        &[
+            &new_window,
+            &private_window,
+            &new_tab,
+            &reopen_tab,
+            &close_tab,
+            &print,
+            &settings,
+        ],
+    )
+    .expect("File menu");
     let view = Submenu::with_items(
         "View",
         true,
         &[
+            &find,
+            &zoom_in,
+            &zoom_out,
+            &zoom_reset,
             &address,
             &switcher,
             &back,
@@ -151,7 +355,30 @@ fn setup_menu(proxy: EventLoopProxy<BrowserEvent>) -> Menu {
         view.append(item).expect("Numbered tab shortcut");
     }
     let menu = Menu::new();
-    menu.append_items(&[&file, &view]).expect("Browser menu");
+    let edit = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &muda::PredefinedMenuItem::undo(None),
+            &muda::PredefinedMenuItem::redo(None),
+            &muda::PredefinedMenuItem::cut(None),
+            &muda::PredefinedMenuItem::copy(None),
+            &muda::PredefinedMenuItem::paste(None),
+            &muda::PredefinedMenuItem::select_all(None),
+        ],
+    )
+    .expect("Edit menu");
+    let application = Submenu::with_items(
+        "Moth",
+        true,
+        &[
+            &muda::PredefinedMenuItem::about(None, None),
+            &muda::PredefinedMenuItem::quit(None),
+        ],
+    )
+    .expect("Application menu");
+    menu.append_items(&[&application, &file, &edit, &view])
+        .expect("Browser menu");
     menu.init_for_nsapp();
     MenuEvent::set_event_handler(Some(move |event| {
         let _ = proxy.send_event(BrowserEvent::Menu(event));

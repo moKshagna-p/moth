@@ -1,0 +1,27 @@
+name: macOS checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo fmt -- --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: node --test ui/*.test.cjs
+      - run: sh scripts/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Moth-macOS-development
+          path: target/release/Moth.zip

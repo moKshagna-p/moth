@@ -41,3 +41,13 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 @media (max-width: 760px) {
   #panel { padding: 40px 24px; }
 }
+
+.download-row { display: flex; align-items: center; gap: 12px; }
+.download-row .entry { flex: 1; min-width: 0; opacity: 1; cursor: default; }
+.download-row > button { padding: 8px; border-radius: 6px; }
+.download-row progress { width: 90px; }
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #202321; --ink: #f1f4ed; --muted: #b7c1b5; --line: #3b433b; }
+  #start { background: #202321; }
+  .entry:hover { background: #303730; }
+}

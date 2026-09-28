@@ -1,4 +1,4 @@
-use crate::protocol::{BrowserEvent, Command};
+use crate::protocol::{BrowserEvent, BrowserProxy, Command};
 use std::{
     ffi::{c_char, c_void, CStr, CString},
     path::Path,
@@ -11,15 +11,16 @@ static PROXY: OnceLock<EventLoopProxy<BrowserEvent>> = OnceLock::new();
 
 unsafe extern "C" {
     fn moth_install_chrome(
+        id: u64,
         parent: *mut c_void,
         callback: extern "C" fn(*const c_char),
         photo_path: *const c_char,
     );
-    fn moth_resize_chrome(width: f64, height: f64);
-    fn moth_update_chrome(json: *const c_char);
-    fn moth_focus_address();
-    fn moth_focus_switcher();
-    fn moth_focus_new_tab();
+    fn moth_resize_chrome(id: u64, width: f64, height: f64);
+    fn moth_update_chrome(id: u64, json: *const c_char);
+    fn moth_focus_address(id: u64);
+    fn moth_focus_switcher(id: u64);
+    fn moth_focus_new_tab(id: u64);
 }
 
 extern "C" fn receive_command(json: *const c_char) {
@@ -29,19 +30,23 @@ extern "C" fn receive_command(json: *const c_char) {
     let Ok(text) = (unsafe { CStr::from_ptr(json) }).to_str() else {
         return;
     };
+    let id = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v["window_id"].as_u64())
+        .unwrap_or(0);
     if let Ok(command) = serde_json::from_str::<Command>(text) {
         if let Some(proxy) = PROXY.get() {
-            let _ = proxy.send_event(BrowserEvent::Command(command));
+            let _ = proxy.send_event(BrowserEvent::Routed(
+                id,
+                Box::new(BrowserEvent::Command(command)),
+            ));
         }
     }
 }
 
-pub(crate) fn install(
-    window: &tao::window::Window,
-    proxy: EventLoopProxy<BrowserEvent>,
-    photo_path: &Path,
-) {
-    let _ = PROXY.set(proxy);
+pub(crate) fn install(window: &tao::window::Window, proxy: BrowserProxy, photo_path: &Path) {
+    let id = proxy.id;
+    let _ = PROXY.set(proxy.proxy);
     let Ok(handle) = window.window_handle() else {
         return;
     };
@@ -50,38 +55,64 @@ pub(crate) fn install(
         CString::new(photo_path.to_string_lossy().as_bytes()),
     ) {
         unsafe {
-            moth_install_chrome(handle.ns_view.as_ptr(), receive_command, path.as_ptr());
+            moth_install_chrome(id, handle.ns_view.as_ptr(), receive_command, path.as_ptr());
         }
     }
 }
 
-pub(crate) fn resize(width: f64, height: f64) {
+pub(crate) fn resize(id: u64, width: f64, height: f64) {
     unsafe {
-        moth_resize_chrome(width, height);
+        moth_resize_chrome(id, width, height);
     }
 }
 
-pub(crate) fn update(json: &str) {
+pub(crate) fn update(id: u64, json: &str) {
     if let Ok(json) = CString::new(json) {
         unsafe {
-            moth_update_chrome(json.as_ptr());
+            moth_update_chrome(id, json.as_ptr());
         }
     }
 }
 
-pub(crate) fn focus_address() {
+pub(crate) fn focus_address(id: u64) {
     unsafe {
-        moth_focus_address();
+        moth_focus_address(id);
     }
 }
-pub(crate) fn focus_switcher() {
+pub(crate) fn focus_switcher(id: u64) {
     unsafe {
-        moth_focus_switcher();
+        moth_focus_switcher(id);
     }
 }
 
-pub(crate) fn focus_new_tab() {
+pub(crate) fn focus_new_tab(id: u64) {
     unsafe {
-        moth_focus_new_tab();
+        moth_focus_new_tab(id);
+    }
+}
+
+unsafe extern "C" {
+    fn moth_page_attach(window: u64, id: u64, generation: u64, view: *mut c_void);
+    fn moth_page_action(window: u64, id: u64, action: *const c_char);
+    fn moth_remove_chrome(id: u64);
+}
+pub(crate) fn attach_page(window: u64, id: u64, generation: u64, view: &wry::WebView) {
+    use wry::WebViewExtMacOS;
+    let native = view.webview();
+    let pointer = (&*native) as *const _ as *mut c_void;
+    unsafe {
+        moth_page_attach(window, id, generation, pointer);
+    }
+}
+pub(crate) fn action(window: u64, id: u64, action: &str) {
+    if let Ok(action) = CString::new(action) {
+        unsafe {
+            moth_page_action(window, id, action.as_ptr());
+        }
+    }
+}
+pub(crate) fn remove(id: u64) {
+    unsafe {
+        moth_remove_chrome(id);
     }
 }
