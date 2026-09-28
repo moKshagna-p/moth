@@ -355,6 +355,9 @@ impl Browser {
         let download_proxy = self.proxy.clone();
         let completed_proxy = self.proxy.clone();
         WebViewBuilder::new()
+            // Bare WKWebView omits Safari's product tokens; Google consequently
+            // serves its simplified results page without the full image UI.
+            .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15")
             .with_url(url)
             .with_visible(false)
             .with_bounds(rect(
