@@ -21,8 +21,8 @@ use tao::{
 };
 use wry::{http::Response, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder};
 
-const SIDEBAR_WIDTH: f64 = 252.0;
-const TOOLBAR_HEIGHT: f64 = 68.0;
+const SIDEBAR_WIDTH: f64 = 220.0;
+const TOOLBAR_HEIGHT: f64 = 50.0;
 const MAX_LIVE_TABS: usize = 8;
 const IDLE_TAB_AGE: Duration = Duration::from_secs(15 * 60);
 
@@ -105,6 +105,7 @@ struct ShellState<'a> {
     photo_version: u64,
     photo_focus_x: u8,
     photo_focus_y: u8,
+    sidebar_width: u16,
 }
 
 #[derive(Serialize)]
@@ -258,10 +259,10 @@ impl Browser {
             || self
                 .active_tab()
                 .is_some_and(|tab| tab.url == "about:blank");
-        let content_width = (size.width - SIDEBAR_WIDTH).max(1.0);
+        let content_width = (size.width - self.data.sidebar_width as f64).max(1.0);
         let content_height = (size.height - TOOLBAR_HEIGHT).max(1.0);
         if self.last_size != Some((size.width, size.height)) {
-            let bounds = rect(SIDEBAR_WIDTH, TOOLBAR_HEIGHT, content_width, content_height);
+            let bounds = rect(self.data.sidebar_width as f64, TOOLBAR_HEIGHT, content_width, content_height);
             let _ = self.shell.set_bounds(bounds);
             #[cfg(target_os = "macos")]
             crate::native_chrome::resize(size.width, size.height);
@@ -361,9 +362,9 @@ impl Browser {
             .with_url(url)
             .with_visible(false)
             .with_bounds(rect(
-                SIDEBAR_WIDTH,
+                self.data.sidebar_width as f64,
                 TOOLBAR_HEIGHT,
-                (size.width - SIDEBAR_WIDTH).max(1.0),
+                (size.width - self.data.sidebar_width as f64).max(1.0),
                 (size.height - TOOLBAR_HEIGHT).max(1.0),
             ))
             .with_on_page_load_handler(move |event, url| {
@@ -552,6 +553,11 @@ impl Browser {
 
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::SetSidebarWidth { width } => {
+                self.data.sidebar_width = width.clamp(180, 360);
+                self.last_size = None;
+                self.resize();
+            }
             Command::Navigate { value } => {
                 self.navigate_active(resolve_address(&value));
             }
@@ -991,6 +997,7 @@ impl Browser {
             photo_version: self.photo_version,
             photo_focus_x: self.data.photo_focus_x,
             photo_focus_y: self.data.photo_focus_y,
+            sidebar_width: self.data.sidebar_width,
         };
         if let Ok(json) = serde_json::to_string(&state) {
             #[cfg(target_os = "macos")]

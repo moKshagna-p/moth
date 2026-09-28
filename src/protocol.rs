@@ -10,6 +10,7 @@ pub(crate) enum Command {
     OpenNewTab { value: String },
     OpenBlankTab,
     SetNewTabPhoto { path: String },
+    SetSidebarWidth { width: u16 },
     SetPhotoPosition { x: u8, y: u8 },
     RemoveNewTabPhoto,
     ReopenClosedTab,

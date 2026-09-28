@@ -45,6 +45,7 @@ function renderPanel() {
   panel.append(list);
 }
 window.renderState = next => {
+  document.documentElement.style.setProperty("--sidebar-width", `${next.sidebar_width ?? 220}px`);
   state = next;
   const active = state.tabs.find(tab => tab.id === state.active);
   $('start').classList.toggle('open', Boolean(active && active.url === 'about:blank' && !state.panel));

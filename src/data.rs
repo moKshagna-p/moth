@@ -40,7 +40,11 @@ pub struct BrowserData {
     pub photo_focus_x: u8,
     #[serde(default = "default_photo_focus")]
     pub photo_focus_y: u8,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
 }
+
+fn default_sidebar_width() -> u16 { 220 }
 
 fn default_photo_focus() -> u8 {
     50
@@ -68,6 +72,7 @@ impl Default for BrowserData {
             active_tab_index: 0,
             photo_focus_x: default_photo_focus(),
             photo_focus_y: default_photo_focus(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }
@@ -88,6 +93,7 @@ impl BrowserData {
         {
             data.active_workspace = data.workspaces[0].id;
         }
+        data.sidebar_width = data.sidebar_width.clamp(180, 360);
         data.photo_focus_x = data.photo_focus_x.min(100);
         data.photo_focus_y = data.photo_focus_y.min(100);
         data
@@ -157,9 +163,18 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_width_survives_serialization() {
+        let mut state = BrowserData::default();
+        state.sidebar_width = 310;
+        let restored: BrowserData = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(restored.sidebar_width, 310);
+    }
+
+    #[test]
     fn older_state_defaults_to_centered_photo() {
         let state: BrowserData = serde_json::from_str("{\"bookmarks\":[],\"history\":[]}").unwrap();
         assert_eq!((state.photo_focus_x, state.photo_focus_y), (50, 50));
         assert_eq!(state.active_tab_index, 0);
+        assert_eq!(state.sidebar_width, 220);
     }
 }
