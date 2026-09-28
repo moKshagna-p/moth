@@ -60,6 +60,7 @@ struct Tab {
     activations: u32,
     url: String,
     title: String,
+    favicon: Option<String>,
     loading: bool,
     site_color: Option<[u8; 3]>,
 }
@@ -85,6 +86,7 @@ struct TabState<'a> {
     workspace: u64,
     url: &'a str,
     title: &'a str,
+    favicon: Option<&'a str>,
     loading: bool,
     sleeping: bool,
 }
@@ -312,6 +314,7 @@ impl Browser {
             activations: 0,
             url: url.into(),
             title: "New tab".into(),
+            favicon: crate::favicon::fallback(url),
             loading: url != "about:blank",
             site_color: None,
         });
@@ -345,6 +348,7 @@ impl Browser {
             generation: 0,
             last_used: Instant::now(),
             activations: 0,
+            favicon: crate::favicon::fallback(&session.url),
             url: session.url,
             title,
             loading: false,
@@ -489,6 +493,7 @@ impl Browser {
                 }
             }
         }
+        self.tabs[index].favicon = crate::favicon::fallback(&url);
         self.tabs[index].url = url;
         self.tabs[index].last_used = Instant::now();
         self.panel = None;
@@ -774,6 +779,7 @@ impl Browser {
                     .iter_mut()
                     .find(|tab| tab.id == id && tab.generation == generation && tab.view.is_some())
                 {
+                    tab.favicon = crate::favicon::fallback(&url);
                     tab.url = url;
                     tab.loading = true;
                     tab.site_color = None;
@@ -800,6 +806,7 @@ impl Browser {
                 self.sample_site_color(id, generation);
                 self.reap_tabs();
                 self.resize();
+                self.request_favicon(id, generation);
                 self.refresh();
             }
             BrowserEvent::SiteColor(id, generation, url, color) => {
@@ -839,7 +846,24 @@ impl Browser {
                     return;
                 }
                 self.sample_site_color(id, generation);
+                self.request_favicon(id, generation);
                 self.refresh();
+            }
+            BrowserEvent::FaviconChanged(id, generation, icon) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+                    tab.id == id
+                        && tab.generation == generation
+                        // Read the live URL: sites like Gmail update the fragment
+                        // without emitting a page-load event.
+                        && tab.view.as_ref().and_then(|view| view.url().ok()).as_deref()
+                            == Some(icon.page.as_str())
+                }) {
+                    let favicon = icon.icon.as_deref().and_then(crate::favicon::web_icon);
+                    if tab.favicon != favicon {
+                        tab.favicon = favicon;
+                        self.refresh();
+                    }
+                }
             }
             BrowserEvent::OpenTab(url) => {
                 if let Err(error) = self.new_tab(&url) {
@@ -876,6 +900,23 @@ impl Browser {
                 self.refresh();
             }
         }
+    }
+
+    fn request_favicon(&self, id: u64, generation: u64) {
+        let Some(view) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id && tab.generation == generation)
+            .and_then(|tab| tab.view.as_ref())
+        else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let _ = view.evaluate_script_with_callback(crate::favicon::SCRIPT, move |result| {
+            if let Ok(icon) = serde_json::from_str::<crate::favicon::PageIcon>(&result) {
+                let _ = proxy.send_event(BrowserEvent::FaviconChanged(id, generation, icon));
+            }
+        });
     }
 
     #[cfg(target_os = "macos")]
@@ -994,6 +1035,7 @@ impl Browser {
                     workspace: tab.workspace,
                     url: &tab.url,
                     title: &tab.title,
+                    favicon: tab.favicon.as_deref(),
                     loading: tab.loading,
                     sleeping: tab.view.is_none() && tab.url != "about:blank",
                 })
@@ -1090,6 +1132,7 @@ mod tests {
             activations: 1,
             url: "about:blank".into(),
             title: "New tab".into(),
+            favicon: None,
             loading: false,
             site_color: None,
         }

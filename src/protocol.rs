@@ -40,6 +40,7 @@ pub(crate) enum BrowserEvent {
     PageFinished(u64, u64, String),
     TitleChanged(u64, u64, String),
     SiteColor(u64, u64, String, [u8; 3]),
+    FaviconChanged(u64, u64, crate::favicon::PageIcon),
     OpenTab(String),
     DownloadStarted(String, String),
     DownloadFinished(String, bool),

@@ -13,6 +13,7 @@ private struct TabInfo: Decodable, Identifiable {
     let id: UInt64
     let url: String
     let title: String
+    let favicon: String?
     let loading: Bool
     let sleeping: Bool
     let workspace: UInt64
@@ -407,10 +408,17 @@ private struct SidebarView: View {
         let row = HStack(spacing: 10) {
             Button { model.send("switch_tab", ["id": tab.id]) } label: {
                 HStack(spacing: 11) {
-                    Image(systemName: tab.sleeping ? "moon.zzz" : tab.url == "about:blank" ? "square.dashed" : "globe")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(model.chromeInk)
-                        .frame(width: 17)
+                    AsyncImage(url: tab.favicon.flatMap(URL.init(string:))) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFit()
+                        } else {
+                            Image(systemName: tab.sleeping ? "moon.zzz" : tab.url == "about:blank" ? "square.dashed" : "globe")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(model.chromeInk)
+                        }
+                    }
+                    .frame(width: 17, height: 17)
+                    .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(tab.title.isEmpty ? "New Tab" : tab.title)
                             .foregroundStyle(model.chromeInk)
