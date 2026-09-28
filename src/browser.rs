@@ -21,8 +21,8 @@ use tao::{
 };
 use wry::{http::Response, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder};
 
-const SIDEBAR_WIDTH: f64 = 252.0;
-const TOOLBAR_HEIGHT: f64 = 68.0;
+const SIDEBAR_WIDTH: f64 = 220.0;
+const TOOLBAR_HEIGHT: f64 = 50.0;
 const MAX_LIVE_TABS: usize = 8;
 const IDLE_TAB_AGE: Duration = Duration::from_secs(15 * 60);
 
@@ -60,7 +60,24 @@ struct Tab {
     activations: u32,
     url: String,
     title: String,
+    favicon: Option<String>,
     loading: bool,
+    site_color: Option<[u8; 3]>,
+}
+
+fn record_tab_switch(tabs: &mut [Tab], previous: u64, next: u64, now: Instant) {
+    if previous == next {
+        return;
+    }
+    for tab in tabs {
+        if tab.id == previous || tab.id == next {
+            // Time spent reading the foreground tab is not idle time.
+            tab.last_used = now;
+        }
+        if tab.id == next {
+            tab.activations = tab.activations.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -69,6 +86,7 @@ struct TabState<'a> {
     workspace: u64,
     url: &'a str,
     title: &'a str,
+    favicon: Option<&'a str>,
     loading: bool,
     sleeping: bool,
 }
@@ -90,6 +108,8 @@ struct ShellState<'a> {
     photo_version: u64,
     photo_focus_x: u8,
     photo_focus_y: u8,
+    sidebar_width: u16,
+    site_color: Option<[u8; 3]>,
 }
 
 #[derive(Serialize)]
@@ -243,10 +263,10 @@ impl Browser {
             || self
                 .active_tab()
                 .is_some_and(|tab| tab.url == "about:blank");
-        let content_width = (size.width - SIDEBAR_WIDTH).max(1.0);
+        let content_width = (size.width - self.data.sidebar_width as f64).max(1.0);
         let content_height = (size.height - TOOLBAR_HEIGHT).max(1.0);
         if self.last_size != Some((size.width, size.height)) {
-            let bounds = rect(SIDEBAR_WIDTH, TOOLBAR_HEIGHT, content_width, content_height);
+            let bounds = rect(self.data.sidebar_width as f64, TOOLBAR_HEIGHT, content_width, content_height);
             let _ = self.shell.set_bounds(bounds);
             #[cfg(target_os = "macos")]
             crate::native_chrome::resize(size.width, size.height);
@@ -291,11 +311,14 @@ impl Browser {
             visible: false,
             generation: 1,
             last_used: Instant::now(),
-            activations: 1,
+            activations: 0,
             url: url.into(),
             title: "New tab".into(),
+            favicon: crate::favicon::fallback(url),
             loading: url != "about:blank",
+            site_color: None,
         });
+        record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
         self.panel = None;
         self.resize();
@@ -325,9 +348,25 @@ impl Browser {
             generation: 0,
             last_used: Instant::now(),
             activations: 0,
+            favicon: crate::favicon::fallback(&session.url),
             url: session.url,
             title,
             loading: false,
+            site_color: None,
+        });
+    }
+
+    fn sample_site_color(&self, id: u64, generation: u64) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id && tab.generation == generation
+            && !tab.loading && (tab.url.starts_with("https://") || tab.url.starts_with("http://"))) else { return };
+        let Some(view) = &tab.view else { return };
+        let proxy = self.proxy.clone();
+        let _ = view.evaluate_script_with_callback(include_str!("../ui/site-theme.js"), move |result| {
+            #[derive(serde::Deserialize)]
+            struct Sample { url: String, color: [u8; 3] }
+            if let Ok(sample) = serde_json::from_str::<Sample>(&result) {
+                let _ = proxy.send_event(BrowserEvent::SiteColor(id, generation, sample.url, sample.color));
+            }
         });
     }
 
@@ -339,12 +378,15 @@ impl Browser {
         let download_proxy = self.proxy.clone();
         let completed_proxy = self.proxy.clone();
         WebViewBuilder::new()
+            // Bare WKWebView omits Safari's product tokens; Google consequently
+            // serves its simplified results page without the full image UI.
+            .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15")
             .with_url(url)
             .with_visible(false)
             .with_bounds(rect(
-                SIDEBAR_WIDTH,
+                self.data.sidebar_width as f64,
                 TOOLBAR_HEIGHT,
-                (size.width - SIDEBAR_WIDTH).max(1.0),
+                (size.width - self.data.sidebar_width as f64).max(1.0),
                 (size.height - TOOLBAR_HEIGHT).max(1.0),
             ))
             .with_on_page_load_handler(move |event, url| {
@@ -403,10 +445,10 @@ impl Browser {
             self.tabs[index].generation = generation;
             self.tabs[index].loading = true;
         }
-        self.tabs[index].last_used = Instant::now();
-        self.tabs[index].activations = self.tabs[index].activations.saturating_add(1);
+        record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
         self.active_workspace = self.tabs[index].workspace;
+        self.sample_site_color(id, self.tabs[index].generation);
         self.panel = None;
         self.resize();
         self.reap_tabs();
@@ -430,6 +472,7 @@ impl Browser {
             self.tabs[index].generation += 1;
             self.tabs[index].loading = false;
             self.tabs[index].title = "New tab".into();
+            self.tabs[index].site_color = None;
         } else if let Some(view) = &self.tabs[index].view {
             if let Err(error) = view.load_url(&url) {
                 eprintln!("Cannot load {url}: {error}");
@@ -450,10 +493,12 @@ impl Browser {
                 }
             }
         }
+        self.tabs[index].favicon = crate::favicon::fallback(&url);
         self.tabs[index].url = url;
         self.tabs[index].last_used = Instant::now();
         self.panel = None;
         self.resize();
+        self.reap_tabs();
     }
 
     pub(crate) fn reap_tabs(&mut self) {
@@ -533,6 +578,11 @@ impl Browser {
 
     fn handle_command(&mut self, command: Command) {
         match command {
+            Command::SetSidebarWidth { width } => {
+                self.data.sidebar_width = width.clamp(180, 360);
+                self.last_size = None;
+                self.resize();
+            }
             Command::Navigate { value } => {
                 self.navigate_active(resolve_address(&value));
             }
@@ -729,8 +779,13 @@ impl Browser {
                     .iter_mut()
                     .find(|tab| tab.id == id && tab.generation == generation && tab.view.is_some())
                 {
+                    tab.favicon = crate::favicon::fallback(&url);
                     tab.url = url;
                     tab.loading = true;
+                    tab.site_color = None;
+                    self.save();
+                } else {
+                    return;
                 }
                 self.resize();
                 self.refresh();
@@ -745,10 +800,23 @@ impl Browser {
                     tab.loading = false;
                     self.data.visit(&url, &tab.title);
                     self.save();
+                } else {
+                    return;
                 }
+                self.sample_site_color(id, generation);
                 self.reap_tabs();
                 self.resize();
+                self.request_favicon(id, generation);
                 self.refresh();
+            }
+            BrowserEvent::SiteColor(id, generation, url, color) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab|
+                    tab.id == id && tab.generation == generation && tab.view.is_some()
+                        && !tab.loading && tab.url == url)
+                {
+                    tab.site_color = Some(color);
+                    self.refresh();
+                }
             }
             BrowserEvent::TitleChanged(id, generation, title) => {
                 if let Some(tab) = self
@@ -774,8 +842,28 @@ impl Browser {
                         entry.title = tab.title.clone();
                         self.save();
                     }
+                } else {
+                    return;
                 }
+                self.sample_site_color(id, generation);
+                self.request_favicon(id, generation);
                 self.refresh();
+            }
+            BrowserEvent::FaviconChanged(id, generation, icon) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+                    tab.id == id
+                        && tab.generation == generation
+                        // Read the live URL: sites like Gmail update the fragment
+                        // without emitting a page-load event.
+                        && tab.view.as_ref().and_then(|view| view.url().ok()).as_deref()
+                            == Some(icon.page.as_str())
+                }) {
+                    let favicon = icon.icon.as_deref().and_then(crate::favicon::web_icon);
+                    if tab.favicon != favicon {
+                        tab.favicon = favicon;
+                        self.refresh();
+                    }
+                }
             }
             BrowserEvent::OpenTab(url) => {
                 if let Err(error) = self.new_tab(&url) {
@@ -812,6 +900,23 @@ impl Browser {
                 self.refresh();
             }
         }
+    }
+
+    fn request_favicon(&self, id: u64, generation: u64) {
+        let Some(view) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id && tab.generation == generation)
+            .and_then(|tab| tab.view.as_ref())
+        else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let _ = view.evaluate_script_with_callback(crate::favicon::SCRIPT, move |result| {
+            if let Ok(icon) = serde_json::from_str::<crate::favicon::PageIcon>(&result) {
+                let _ = proxy.send_event(BrowserEvent::FaviconChanged(id, generation, icon));
+            }
+        });
     }
 
     #[cfg(target_os = "macos")]
@@ -930,6 +1035,7 @@ impl Browser {
                     workspace: tab.workspace,
                     url: &tab.url,
                     title: &tab.title,
+                    favicon: tab.favicon.as_deref(),
                     loading: tab.loading,
                     sleeping: tab.view.is_none() && tab.url != "about:blank",
                 })
@@ -965,6 +1071,8 @@ impl Browser {
             photo_version: self.photo_version,
             photo_focus_x: self.data.photo_focus_x,
             photo_focus_y: self.data.photo_focus_y,
+            sidebar_width: self.data.sidebar_width,
+            site_color: active.and_then(|tab| tab.site_color),
         };
         if let Ok(json) = serde_json::to_string(&state) {
             #[cfg(target_os = "macos")]
@@ -1007,8 +1115,54 @@ fn photo_mime(bytes: &[u8]) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjacent_tab_index, eviction_score, photo_mime, shortcut_tab_index};
-    use std::time::Duration;
+    use super::{
+        adjacent_tab_index, eviction_score, photo_mime, record_tab_switch, shortcut_tab_index, Tab,
+        IDLE_TAB_AGE,
+    };
+    use std::time::{Duration, Instant};
+
+    fn tab(id: u64, last_used: Instant) -> Tab {
+        Tab {
+            id,
+            workspace: 1,
+            view: None,
+            visible: false,
+            generation: 0,
+            last_used,
+            activations: 1,
+            url: "about:blank".into(),
+            title: "New tab".into(),
+            favicon: None,
+            loading: false,
+            site_color: None,
+        }
+    }
+
+    #[test]
+    fn leaving_a_long_read_starts_a_fresh_idle_period() {
+        let opened = Instant::now();
+        let switched = opened + Duration::from_secs(7200);
+        let mut tabs = vec![tab(1, opened), tab(2, opened), tab(3, opened)];
+        record_tab_switch(&mut tabs, 1, 2, switched);
+        assert_eq!(tabs[0].last_used, switched);
+        assert_eq!(tabs[1].last_used, switched);
+        assert_eq!(tabs[2].last_used, opened);
+        assert_eq!(tabs[0].activations, 1);
+        assert_eq!(tabs[1].activations, 2);
+        assert!(
+            eviction_score(switched - tabs[0].last_used, tabs[0].activations)
+                < IDLE_TAB_AGE.as_millis()
+        );
+    }
+
+    #[test]
+    fn reselecting_active_tab_does_not_inflate_frequency() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now)];
+        record_tab_switch(&mut tabs, 1, 1, now + Duration::from_secs(60));
+        assert_eq!(tabs[0].activations, 1);
+        assert_eq!(tabs[1].activations, 1);
+    }
 
     #[test]
     fn frequently_used_tabs_get_more_time_before_eviction() {

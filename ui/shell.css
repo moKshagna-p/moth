@@ -18,8 +18,7 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 #start, #panel { height: 100vh; overflow-y: auto; }
 #start { display: none; position: relative; background: #f7f7f3; overflow: hidden; }
 #start.open { display: block; }
-#start.has-photo::after { content: ""; position: absolute; inset: 0; background: rgb(255 255 255 / 12%); pointer-events: none; }
-#start-photo { display: none; position: absolute; left: -252px; top: -68px; width: calc(100% + 252px); height: calc(100% + 68px); object-fit: cover; object-position: center; }
+#start-photo { display: none; position: absolute; left: calc(-1 * var(--sidebar-width, 220px)); top: -50px; width: calc(100% + var(--sidebar-width, 220px)); height: calc(100% + 50px); object-fit: cover; object-position: center; }
 #start-photo.visible { display: block; }
 .entry:hover { background: #e9ede7; }
 .site-tile { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 7px; background: #e6eae2; color: var(--accent); font-size: 12px; font-weight: 650; text-transform: uppercase; }
