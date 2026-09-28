@@ -39,6 +39,7 @@ pub(crate) enum BrowserEvent {
     PageStarted(u64, u64, String),
     PageFinished(u64, u64, String),
     TitleChanged(u64, u64, String),
+    SiteColor(u64, u64, String, [u8; 3]),
     OpenTab(String),
     DownloadStarted(String, String),
     DownloadFinished(String, bool),

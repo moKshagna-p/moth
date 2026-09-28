@@ -61,6 +61,7 @@ struct Tab {
     url: String,
     title: String,
     loading: bool,
+    site_color: Option<[u8; 3]>,
 }
 
 fn record_tab_switch(tabs: &mut [Tab], previous: u64, next: u64, now: Instant) {
@@ -106,6 +107,7 @@ struct ShellState<'a> {
     photo_focus_x: u8,
     photo_focus_y: u8,
     sidebar_width: u16,
+    site_color: Option<[u8; 3]>,
 }
 
 #[derive(Serialize)]
@@ -311,6 +313,7 @@ impl Browser {
             url: url.into(),
             title: "New tab".into(),
             loading: url != "about:blank",
+            site_color: None,
         });
         record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
@@ -345,6 +348,21 @@ impl Browser {
             url: session.url,
             title,
             loading: false,
+            site_color: None,
+        });
+    }
+
+    fn sample_site_color(&self, id: u64, generation: u64) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id && tab.generation == generation
+            && !tab.loading && (tab.url.starts_with("https://") || tab.url.starts_with("http://"))) else { return };
+        let Some(view) = &tab.view else { return };
+        let proxy = self.proxy.clone();
+        let _ = view.evaluate_script_with_callback(include_str!("../ui/site-theme.js"), move |result| {
+            #[derive(serde::Deserialize)]
+            struct Sample { url: String, color: [u8; 3] }
+            if let Ok(sample) = serde_json::from_str::<Sample>(&result) {
+                let _ = proxy.send_event(BrowserEvent::SiteColor(id, generation, sample.url, sample.color));
+            }
         });
     }
 
@@ -426,6 +444,7 @@ impl Browser {
         record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
         self.active_workspace = self.tabs[index].workspace;
+        self.sample_site_color(id, self.tabs[index].generation);
         self.panel = None;
         self.resize();
         self.reap_tabs();
@@ -449,6 +468,7 @@ impl Browser {
             self.tabs[index].generation += 1;
             self.tabs[index].loading = false;
             self.tabs[index].title = "New tab".into();
+            self.tabs[index].site_color = None;
         } else if let Some(view) = &self.tabs[index].view {
             if let Err(error) = view.load_url(&url) {
                 eprintln!("Cannot load {url}: {error}");
@@ -756,6 +776,7 @@ impl Browser {
                 {
                     tab.url = url;
                     tab.loading = true;
+                    tab.site_color = None;
                     self.save();
                 } else {
                     return;
@@ -776,9 +797,19 @@ impl Browser {
                 } else {
                     return;
                 }
+                self.sample_site_color(id, generation);
                 self.reap_tabs();
                 self.resize();
                 self.refresh();
+            }
+            BrowserEvent::SiteColor(id, generation, url, color) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab|
+                    tab.id == id && tab.generation == generation && tab.view.is_some()
+                        && !tab.loading && tab.url == url)
+                {
+                    tab.site_color = Some(color);
+                    self.refresh();
+                }
             }
             BrowserEvent::TitleChanged(id, generation, title) => {
                 if let Some(tab) = self
@@ -807,6 +838,7 @@ impl Browser {
                 } else {
                     return;
                 }
+                self.sample_site_color(id, generation);
                 self.refresh();
             }
             BrowserEvent::OpenTab(url) => {
@@ -998,6 +1030,7 @@ impl Browser {
             photo_focus_x: self.data.photo_focus_x,
             photo_focus_y: self.data.photo_focus_y,
             sidebar_width: self.data.sidebar_width,
+            site_color: active.and_then(|tab| tab.site_color),
         };
         if let Ok(json) = serde_json::to_string(&state) {
             #[cfg(target_os = "macos")]
@@ -1058,6 +1091,7 @@ mod tests {
             url: "about:blank".into(),
             title: "New tab".into(),
             loading: false,
+            site_color: None,
         }
     }
 

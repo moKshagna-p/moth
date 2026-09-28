@@ -37,12 +37,19 @@ private struct ChromeSnapshot: Decodable {
     let photo_focus_x: UInt8
     let photo_focus_y: UInt8
     let sidebar_width: UInt16?
+    let site_color: [UInt8]?
 }
 
 @MainActor private final class ChromeModel: ObservableObject {
     @Published var snapshot: ChromeSnapshot?
     @Published var swipeWorkspaces = UserDefaults.standard.object(forKey: "swipeWorkspaces") as? Bool ?? true {
         didSet { UserDefaults.standard.set(swipeWorkspaces, forKey: "swipeWorkspaces") }
+    }
+    @Published var matchSiteColors = UserDefaults.standard.object(forKey: "matchSiteColors") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(matchSiteColors, forKey: "matchSiteColors")
+            updateContrast()
+        }
     }
     @Published var customizingWallpaper = false
     @Published var sidebarWidth: CGFloat = 220
@@ -70,6 +77,7 @@ private struct ChromeSnapshot: Decodable {
               let next = try? JSONDecoder().decode(ChromeSnapshot.self, from: data) else { return }
         let cropChanged = snapshot?.photo_focus_x != next.photo_focus_x || snapshot?.photo_focus_y != next.photo_focus_y
         let photoChanged = next.photo_version != loadedPhotoVersion
+        let themeChanged = snapshot?.site_color != next.site_color
         sidebarWidth = CGFloat(next.sidebar_width ?? 220)
         snapshot = next
         if next.photo_version != loadedPhotoVersion {
@@ -77,7 +85,7 @@ private struct ChromeSnapshot: Decodable {
             wallpaper = next.has_photo ? NSImage(contentsOfFile: photoPath) : nil
             photoSample = wallpaper.flatMap(makePhotoSample)
         }
-        if photoChanged || cropChanged { updateContrast() }
+        if photoChanged || cropChanged || themeChanged { updateContrast() }
         if !editingAddress { address = activeTab?.url == "about:blank" ? "" : activeTab?.url ?? "" }
     }
 
@@ -86,6 +94,17 @@ private struct ChromeSnapshot: Decodable {
 
     var wallpaperVisible: Bool {
         wallpaper != nil
+    }
+
+    var siteColor: Color? {
+        guard let rgb = siteRGB,
+              (rgb.max() ?? 0) - (rgb.min() ?? 0) > 0.08 else { return nil }
+        return Color(red: rgb[0], green: rgb[1], blue: rgb[2])
+    }
+
+    private var siteRGB: [Double]? {
+        guard matchSiteColors, let rgb = snapshot?.site_color, rgb.count == 3 else { return nil }
+        return rgb.map { Double($0) / 255 }
     }
 
     private func updateContrast() {
@@ -250,6 +269,13 @@ private struct ChromeSurface: View {
             }
             if !model.wallpaperVisible {
                 ChromeShape(sidebarWidth: model.sidebarWidth).fill(toolbarColor).allowsHitTesting(false)
+            }
+            if let color = model.siteColor {
+                // Keep the original frosted photo visible; tint only the chrome.
+                ChromeShape(sidebarWidth: model.sidebarWidth)
+                    .fill(LinearGradient(colors: [color.opacity(0.14), color.opacity(0.025)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .allowsHitTesting(false)
             }
             GlassEffectContainer(spacing: 0) {
                 HStack(alignment: .top, spacing: 0) {
@@ -431,6 +457,7 @@ private struct SidebarView: View {
                     Button(workspace.name) { model.send("switch_workspace", ["id": workspace.id]) }
                 }
                 Toggle("Swipe to switch workspaces", isOn: $model.swipeWorkspaces)
+                Toggle("Website color highlights", isOn: $model.matchSiteColors)
                 Button(model.customizingWallpaper ? "Hide wallpaper controls" : "Customize wallpaper") {
                     model.customizingWallpaper.toggle()
                     ChromeBridge.shared.updatePhotoControls()
