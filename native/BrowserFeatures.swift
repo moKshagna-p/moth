@@ -187,7 +187,11 @@ struct BrowserSettings: Codable {
         return super.forwardingTarget(for: selector)
     }
     func report(_ error: Error) {
-        guard (error as NSError).code != NSURLErrorCancelled else { return }
+        let failure = error as NSError
+        // WebKit interrupts navigation when a response becomes a download.
+        // That policy transition is not a page failure.
+        guard !(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled),
+              !(failure.domain == "WebKitErrorDomain" && failure.code == 102) else { return }
         model?.send("page_error", ["id": id, "generation": generation, "message": error.localizedDescription + " Use Reload to retry."])
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { report(error) }
