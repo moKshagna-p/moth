@@ -84,6 +84,7 @@ struct BrowserSettings: Codable {
 }
 
 @MainActor enum BrowserFeatures {
+    static var privateStores: [UInt64: WKWebsiteDataStore] = [:]
     static var pages: [String: PageDelegate] = [:]
     static var downloads: [String: DownloadDelegate] = [:]
     static var settingsWindows: [UInt64: NSWindow] = [:]
@@ -95,6 +96,7 @@ struct BrowserSettings: Codable {
         return "\(scheme.lowercased())://\(host.lowercased())" + (port.map { ":\($0)" } ?? "")
     }
     static func removeWindow(_ id: UInt64) {
+        privateStores.removeValue(forKey: id)
         pages = pages.filter { $0.value.window != id }
         let replacement = ChromeBridge.instances.values.first {
             $0.model.windowID != id && $0.model.snapshot?.private_mode == false
@@ -278,4 +280,15 @@ func moth_page_action(_ window: UInt64, _ id: UInt64, _ action: UnsafePointer<CC
     guard let action else { return }
     let value = String(cString: action)
     MainActor.assumeIsolated { BrowserFeatures.action(window, id, value) }
+}
+
+@_cdecl("moth_private_configuration")
+func moth_private_configuration(_ window: UInt64) -> UnsafeMutableRawPointer {
+    MainActor.assumeIsolated {
+        let store = BrowserFeatures.privateStores[window] ?? WKWebsiteDataStore.nonPersistent()
+        BrowserFeatures.privateStores[window] = store
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = store
+        return Unmanaged.passRetained(configuration).toOpaque()
+    }
 }

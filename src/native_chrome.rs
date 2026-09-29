@@ -116,3 +116,16 @@ pub(crate) fn remove(id: u64) {
         moth_remove_chrome(id);
     }
 }
+
+pub(crate) fn private_configuration(
+    id: u64,
+) -> objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration> {
+    unsafe extern "C" {
+        fn moth_private_configuration(id: u64) -> *mut objc2_web_kit::WKWebViewConfiguration;
+    }
+    // Swift returns a newly retained configuration with this window's ephemeral store.
+    unsafe {
+        objc2::rc::Retained::from_raw(moth_private_configuration(id))
+            .expect("private configuration")
+    }
+}

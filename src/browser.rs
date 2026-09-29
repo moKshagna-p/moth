@@ -311,6 +311,10 @@ impl Browser {
     }
 
     pub(crate) fn resize(&mut self) {
+        self.split = valid_split(&self.tabs, self.active, self.split);
+        if self.split.is_none() {
+            self.split_right = None;
+        }
         let size = self.size();
         let show_shell_page = self.panel.is_some()
             || self
@@ -479,7 +483,16 @@ impl Browser {
         let window_proxy = self.proxy.clone();
         let download_proxy = self.proxy.clone();
         let completed_proxy = self.proxy.clone();
-        let view = WebViewBuilder::new()
+        let builder = WebViewBuilder::new();
+        #[cfg(target_os = "macos")]
+        let builder = if self.private_mode {
+            use wry::WebViewBuilderExtMacos;
+            builder
+                .with_webview_configuration(crate::native_chrome::private_configuration(self.key))
+        } else {
+            builder
+        };
+        let view = builder
             .with_incognito(self.private_mode)
             // Bare WKWebView omits Safari's product tokens; Google consequently
             // serves its simplified results page without the full image UI.
@@ -541,6 +554,7 @@ impl Browser {
     }
 
     fn activate_tab(&mut self, id: u64) -> wry::Result<()> {
+        self.split = valid_split(&self.tabs, self.active, self.split);
         if Some(id) == self.split {
             self.split = Some(self.active);
         } else if id != self.active {
@@ -702,6 +716,7 @@ impl Browser {
                 self.switch_tab(id);
             }
         } else {
+            self.resize();
             self.refresh();
         }
     }
@@ -1459,11 +1474,17 @@ fn photo_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn valid_split(tabs: &[Tab], active: u64, split: Option<u64>) -> Option<u64> {
+    let active = tabs.iter().find(|tab| tab.id == active)?;
+    let other = tabs.iter().find(|tab| Some(tab.id) == split)?;
+    (active.id != other.id && active.workspace == other.workspace).then_some(other.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         adjacent_tab_index, eviction_score, photo_mime, record_tab_switch, reorder_tabs,
-        shortcut_tab_index, Tab, IDLE_TAB_AGE,
+        shortcut_tab_index, valid_split, Tab, IDLE_TAB_AGE,
     };
     use std::time::{Duration, Instant};
 
@@ -1484,6 +1505,19 @@ mod tests {
             pinned: false,
             zoom: 1.0,
         }
+    }
+
+    #[test]
+    fn split_requires_two_live_tabs_in_the_same_workspace() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now)];
+        assert_eq!(valid_split(&tabs, 1, Some(2)), Some(2));
+        assert_eq!(valid_split(&tabs[1..], 1, Some(2)), None);
+        assert_eq!(valid_split(&tabs[..1], 1, Some(2)), None);
+        assert_eq!(valid_split(&tabs, 1, Some(1)), None);
+        tabs[1].workspace = 2;
+        assert_eq!(valid_split(&tabs, 1, Some(2)), None);
+        assert_eq!(valid_split(&tabs, 2, Some(1)), None);
     }
 
     #[test]

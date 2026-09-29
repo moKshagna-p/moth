@@ -1178,6 +1178,8 @@ version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
  "muda",
+ "objc2",
+ "objc2-web-kit",
  "serde",
  "serde_json",
  "tao",

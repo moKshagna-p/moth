@@ -50,10 +50,15 @@ pub(crate) fn run() {
                     .find(|(_, b)| b.window.id() == window_id)
                     .map(|(k, _)| *k)
                 {
-                    persist(&mut windows, true);
+                    // Preserve the final normal window for startup restore, but
+                    // exclude a closed window when other normal windows survive.
+                    if windows.values().filter(|b| !b.private_mode).count() <= 1 {
+                        persist(&mut windows, true);
+                    }
                     #[cfg(target_os = "macos")]
                     crate::native_chrome::remove(key);
                     windows.remove(&key);
+                    persist(&mut windows, true);
                     if windows.is_empty() {
                         *control_flow = ControlFlow::Exit;
                         return;
