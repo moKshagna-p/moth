@@ -6,8 +6,6 @@ private let toolbarHeight: CGFloat = 50
 private let ink = Color(red: 0.16, green: 0.18, blue: 0.16)
 private let muted = Color(red: 0.44, green: 0.47, blue: 0.43)
 private let accent = Color(red: 0.29, green: 0.39, blue: 0.31)
-private let sidebarColor = Color(red: 0.92, green: 0.93, blue: 0.90)
-private let toolbarColor = Color(red: 0.97, green: 0.97, blue: 0.95)
 
 struct TabInfo: Decodable, Identifiable {
     let id: UInt64
@@ -67,6 +65,18 @@ struct ChromeSnapshot: Decodable {
     @Published var workspaceName = ""
     @Published var windowSize = CGSize(width: 1000, height: 768) { didSet { updateContrast() } }
     @Published var chromeScheme: ColorScheme = .light
+    private var appearanceObservation: NSKeyValueObservation?
+
+    init() {
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.updateContrast()
+                self?.bridge?.updateAppearance()
+            }
+        }
+        updateContrast()
+    }
+
     private var photoSample: NSBitmapImageRep?
     @Published var wallpaper: NSImage?
     var photoPath = ""
@@ -104,7 +114,7 @@ struct ChromeSnapshot: Decodable {
     }
 
     var siteColor: Color? {
-        guard let rgb = siteRGB,
+        guard wallpaperVisible, let rgb = siteRGB,
               (rgb.max() ?? 0) - (rgb.min() ?? 0) > 0.08 else { return nil }
         return Color(red: rgb[0], green: rgb[1], blue: rgb[2])
     }
@@ -115,6 +125,10 @@ struct ChromeSnapshot: Decodable {
     }
 
     private func updateContrast() {
+        guard wallpaperVisible else {
+            chromeScheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+            return
+        }
         if snapshot?.settings.appearance == "dark" { chromeScheme = .dark; return }
         if snapshot?.settings.appearance == "light" { chromeScheme = .light; return }
         guard let sample = photoSample, let wallpaper else {
@@ -277,7 +291,7 @@ private struct ChromeSurface: View {
                 .allowsHitTesting(false)
             }
             if !model.wallpaperVisible {
-                ChromeShape(sidebarWidth: model.sidebarWidth).fill(toolbarColor).allowsHitTesting(false)
+                ChromeShape(sidebarWidth: model.sidebarWidth).fill(model.chromeScheme == .dark ? Color.black : Color.white).allowsHitTesting(false)
             }
             if let color = model.siteColor {
                 // Keep the original frosted photo visible; tint only the chrome.
@@ -814,7 +828,7 @@ private struct PhotoPositionEditor: View {
         let chrome = ChromeHostingView(rootView: ChromeSurface(model: model))
         let palette = NSHostingView(rootView: PaletteOverlay(model: model))
         let photoControls = NSHostingView(rootView: PhotoControls(model: model))
-        parent.window?.appearance = NSAppearance(named: .aqua)
+        parent.window?.appearance = nil
         chrome.autoresizingMask = []
         palette.autoresizingMask = []
         photoControls.autoresizingMask = []
@@ -837,7 +851,7 @@ private struct PhotoPositionEditor: View {
     }
 
     func updateAppearance() {
-        let preference = model.snapshot?.settings.appearance ?? "system"
+        let preference = model.wallpaperVisible ? (model.snapshot?.settings.appearance ?? "system") : "system"
         parent?.window?.appearance = preference == "system" ? nil : NSAppearance(named: preference == "dark" ? .darkAqua : .aqua)
         chrome?.appearance = NSAppearance(named: model.chromeScheme == .dark ? .darkAqua : .aqua)
     }

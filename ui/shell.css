@@ -1,8 +1,8 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  --paper: #f7f7f3;
-  --ink: #292d28;
+  --paper: #ffffff;
+  --ink: #000000;
   --muted: #777d74;
   --accent: #4b644f;
   --line: #dedfd8;
@@ -30,7 +30,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
 #start, #panel { height: 100vh; overflow-y: auto; }
-#start { display: none; position: relative; background: #f7f7f3; overflow: hidden; }
+#start { display: none; position: relative; background: var(--paper); overflow: hidden; }
 #start.open { display: block; }
 #start-photo { display: none; position: absolute; left: calc(-1 * var(--sidebar-width, 220px)); top: -50px; width: calc(100% + var(--sidebar-width, 220px)); height: calc(100% + 50px); object-fit: cover; object-position: center; }
 #start-photo.visible { display: block; }
@@ -60,8 +60,7 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 .download-row > button { padding: 8px 12px; border-radius: 999px; }
 .download-row progress { width: 90px; }
 @media (prefers-color-scheme: dark) {
-  :root { --paper: #202321; --ink: #f1f4ed; --muted: #b7c1b5; --line: #3b433b; --glass: rgba(70, 77, 72, .58); --glass-hover: rgba(85, 94, 87, .78); --glass-edge: rgba(255, 255, 255, .18); }
-  #start { background: #202321; }
+  :root { --paper: #000000; --ink: #ffffff; --muted: #b7c1b5; --line: #3b433b; --glass: rgba(70, 77, 72, .58); --glass-hover: rgba(85, 94, 87, .78); --glass-edge: rgba(255, 255, 255, .18); }
 }
 
 @media (prefers-reduced-transparency: reduce) {
