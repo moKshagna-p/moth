@@ -135,14 +135,7 @@ pub(crate) fn run() {
             let shared = windows
                 .values()
                 .find(|b| !b.private_mode)
-                .map(|b| b.data.clone())
-                .or_else(|| {
-                    windows
-                        .values()
-                        .next()
-                        .map(|b| crate::data::BrowserData::load(&b.data_path))
-                })
-                .unwrap_or_default();
+                .map(|b| b.data.clone());
             let window = make_window(target);
             match Browser::new(
                 window,
@@ -151,7 +144,7 @@ pub(crate) fn run() {
                     proxy: proxy.clone(),
                 },
                 private,
-                Some(shared),
+                shared,
             ) {
                 Ok(browser) => {
                     windows.insert(next_id, browser);

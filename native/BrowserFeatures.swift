@@ -13,8 +13,13 @@ struct BrowserSettings: Codable {
 @MainActor struct SettingsView: View {
     @ObservedObject var model: ChromeModel
     @State var settings: BrowserSettings
+    private var isPrivate: Bool { model.snapshot?.private_mode == true }
     var body: some View {
         Form {
+            if isPrivate {
+                Text("Private windows use your browser settings. Open Settings in a normal window to change them.")
+            }
+            Group {
             Picker("Search engine", selection: $settings.search_engine) {
                 Text("Google").tag("google")
                 Text("DuckDuckGo").tag("duckduckgo")
@@ -31,6 +36,7 @@ struct BrowserSettings: Codable {
                     if panel.runModal() == .OK { settings.download_directory = panel.url?.path ?? "" }
                 }
             }
+            }.disabled(isPrivate)
             Section("Privacy") {
                 Text("Private windows keep history and website storage in memory. Files you download remain on disk.")
                     .font(.caption)
@@ -38,10 +44,10 @@ struct BrowserSettings: Codable {
                     Picker("Camera and microphone for \(origin)", selection: Binding(
                         get: { settings.site_permissions[origin] ?? "ask" },
                         set: { settings.site_permissions[origin] = $0 }
-                    )) { Text("Ask each time").tag("ask"); Text("Block").tag("deny") }
+                    )) { Text("Ask each time").tag("ask"); Text("Block").tag("deny") }.disabled(isPrivate)
                 }
                 Text("Camera and microphone requests show the requesting site's origin. Other permissions use WebKit and macOS controls.").font(.caption)
-                Button("Reset saved site rules") { settings.site_permissions = [:] }
+                Button("Reset saved site rules") { settings.site_permissions = [:] }.disabled(isPrivate)
                 Button("Clear cookies and cache…") {
                     let alert = NSAlert(); alert.messageText = "Clear website data?"
                     alert.informativeText = "This signs you out of websites. All tabs in this window will close. Other normal windows must be closed first."
@@ -55,7 +61,7 @@ struct BrowserSettings: Codable {
                    let value = try? JSONSerialization.jsonObject(with: data) {
                     model.send("set_settings", ["settings": value])
                 }
-            }.keyboardShortcut(.defaultAction) }
+            }.keyboardShortcut(.defaultAction).disabled(isPrivate) }
         }.formStyle(.grouped).padding().frame(width: 540, height: 550)
     }
 }
@@ -150,7 +156,8 @@ struct BrowserSettings: Codable {
                 if let error { Task { @MainActor in model.send("page_error", ["id": id, "generation": page?.generation ?? 0, "message": error.localizedDescription]) } }
             }
         case "clear_data":
-            WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {
+            let store = model.snapshot?.private_mode == true ? privateStores[window] : WKWebsiteDataStore.default()
+            store?.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {
                 model.send("dismiss_error")
             }
         default:

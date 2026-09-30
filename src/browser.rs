@@ -728,6 +728,9 @@ impl Browser {
             Command::Settings => self.native_action("settings"),
             Command::DefaultBrowser => self.native_action("default_browser"),
             Command::SetSettings { mut settings } => {
+                if self.private_mode {
+                    return;
+                }
                 if !matches!(
                     settings.search_engine.as_str(),
                     "google" | "duckduckgo" | "bing"
@@ -846,9 +849,7 @@ impl Browser {
                 self.tabs.clear();
                 self.closed_tabs.clear();
                 self.split = None;
-                if !self.private_mode {
-                    self.native_action("clear_data");
-                }
+                self.native_action("clear_data");
                 if let Err(e) = self.new_tab("about:blank") {
                     self.error = Some(e.to_string());
                 }
@@ -1331,8 +1332,8 @@ impl Browser {
         crate::native_chrome::action(self.key, self.active, action);
     }
     pub(crate) fn sync_data(&mut self, data: &BrowserData) {
+        self.data.settings = data.settings.clone();
         if !self.private_mode {
-            self.data.settings = data.settings.clone();
             self.data.bookmarks = data.bookmarks.clone();
             self.data.history = data.history.clone();
             self.data.workspaces = data.workspaces.clone();
