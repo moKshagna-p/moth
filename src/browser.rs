@@ -1,8 +1,8 @@
 use crate::{
-    address::resolve_address,
-    data::{BrowserData, Entry, SessionTab, Workspace},
+    address::{resolve_address, resolve_address_with_engine},
+    data::{BrowserData, Download, Entry, SessionTab, Workspace},
     downloads::unique_download_path,
-    protocol::{BrowserEvent, Command},
+    protocol::{BrowserEvent, BrowserProxy, Command},
 };
 #[cfg(target_os = "macos")]
 use muda::MenuEvent;
@@ -16,7 +16,6 @@ use std::{
 };
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
-    event_loop::EventLoopProxy,
     window::Window,
 };
 use wry::{http::Response, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder};
@@ -63,6 +62,27 @@ struct Tab {
     favicon: Option<String>,
     loading: bool,
     site_color: Option<[u8; 3]>,
+    pinned: bool,
+    zoom: f64,
+}
+
+fn reorder_tabs(tabs: &mut Vec<Tab>, id: u64, before: u64) {
+    if let (Some(from), Some(to)) = (
+        tabs.iter().position(|t| t.id == id),
+        tabs.iter().position(|t| t.id == before),
+    ) {
+        if id != before
+            && tabs[from].workspace == tabs[to].workspace
+            && tabs[from].pinned == tabs[to].pinned
+        {
+            let tab = tabs.remove(from);
+            let to = tabs
+                .iter()
+                .position(|t| t.id == before)
+                .unwrap_or(tabs.len());
+            tabs.insert(to, tab);
+        }
+    }
 }
 
 fn record_tab_switch(tabs: &mut [Tab], previous: u64, next: u64, now: Instant) {
@@ -89,10 +109,14 @@ struct TabState<'a> {
     favicon: Option<&'a str>,
     loading: bool,
     sleeping: bool,
+    pinned: bool,
 }
 
 #[derive(Serialize)]
 struct ShellState<'a> {
+    private_mode: bool,
+    error: Option<&'a str>,
+    settings: &'a crate::data::Settings,
     tabs: Vec<TabState<'a>>,
     workspaces: &'a [Workspace],
     active: u64,
@@ -112,16 +136,13 @@ struct ShellState<'a> {
     site_color: Option<[u8; 3]>,
 }
 
-#[derive(Serialize)]
-struct Download {
-    url: String,
-    filename: String,
-    complete: bool,
-    success: bool,
-}
-
 pub(crate) struct Browser {
-    window: Window,
+    pub(crate) window: Window,
+    pub(crate) private_mode: bool,
+    pub(crate) key: u64,
+    split: Option<u64>,
+    split_right: Option<u64>,
+    pub(crate) error: Option<String>,
     shell: WebView,
     tabs: Vec<Tab>,
     closed_tabs: Vec<String>,
@@ -129,19 +150,24 @@ pub(crate) struct Browser {
     active_workspace: u64,
     next_tab_id: u64,
     panel: Option<String>,
-    data: BrowserData,
-    data_path: PathBuf,
+    pub(crate) data: BrowserData,
+    pub(crate) data_path: PathBuf,
     photo_path: PathBuf,
     photo_version: u64,
     downloads: Vec<Download>,
-    save_due: Option<Instant>,
+    pub(crate) save_due: Option<Instant>,
     last_size: Option<(f64, f64)>,
     shell_visible: Option<bool>,
-    proxy: EventLoopProxy<BrowserEvent>,
+    proxy: BrowserProxy,
 }
 
 impl Browser {
-    pub(crate) fn new(window: Window, proxy: EventLoopProxy<BrowserEvent>) -> wry::Result<Self> {
+    pub(crate) fn new(
+        window: Window,
+        proxy: BrowserProxy,
+        private_mode: bool,
+        shared: Option<BrowserData>,
+    ) -> wry::Result<Self> {
         let data_path = std::env::var_os("MOTH_DATA_DIR")
             .map(PathBuf::from)
             .or_else(dirs::data_dir)
@@ -155,6 +181,8 @@ impl Browser {
             .replace("/* MOTH_CSS */", include_str!("../ui/shell.css"))
             .replace("/* MOTH_JS */", include_str!("../ui/shell.js"));
         let shell = WebViewBuilder::new()
+            .with_incognito(true)
+            .with_navigation_handler(|url| url == "about:blank")
             .with_html(shell_html)
             .with_custom_protocol("moth-photo".into(), move |_, request| {
                 if request.uri().path() != "/photo" {
@@ -186,14 +214,39 @@ impl Browser {
             })
             .build_as_child(&window)?;
 
-        let data = BrowserData::load(&data_path);
-        let restored_tabs = data.session_tabs.clone();
+        let first_window = shared.is_none();
+        let data = shared.unwrap_or_else(|| BrowserData::load(&data_path));
+        let restored_tabs = if first_window && !private_mode && data.settings.restore_session {
+            data.session_tabs.clone()
+        } else {
+            Vec::new()
+        };
         let active_tab_index = data.active_tab_index;
         let active_workspace = data.active_workspace;
         #[cfg(target_os = "macos")]
         crate::native_chrome::install(&window, proxy.clone(), &photo_path);
         let mut browser = Self {
             window,
+            private_mode,
+            key: proxy.id,
+            split: None,
+            split_right: None,
+            error: None,
+            downloads: if private_mode {
+                Vec::new()
+            } else {
+                data.downloads
+                    .clone()
+                    .into_iter()
+                    .map(|mut d| {
+                        if first_window && !d.complete {
+                            d.complete = true;
+                            d.success = false;
+                        }
+                        d
+                    })
+                    .collect()
+            },
             shell,
             tabs: Vec::new(),
             closed_tabs: Vec::new(),
@@ -205,12 +258,12 @@ impl Browser {
             data_path,
             photo_version: u64::from(photo_path.exists()),
             photo_path,
-            downloads: Vec::new(),
             save_due: None,
             last_size: None,
             shell_visible: None,
             proxy,
         };
+        browser.data.downloads = browser.downloads.clone();
         browser.resize();
         let mut restored_active = None;
         for (index, tab) in restored_tabs.into_iter().enumerate() {
@@ -258,6 +311,10 @@ impl Browser {
     }
 
     pub(crate) fn resize(&mut self) {
+        self.split = valid_split(&self.tabs, self.active, self.split);
+        if self.split.is_none() {
+            self.split_right = None;
+        }
         let size = self.size();
         let show_shell_page = self.panel.is_some()
             || self
@@ -266,10 +323,15 @@ impl Browser {
         let content_width = (size.width - self.data.sidebar_width as f64).max(1.0);
         let content_height = (size.height - TOOLBAR_HEIGHT).max(1.0);
         if self.last_size != Some((size.width, size.height)) {
-            let bounds = rect(self.data.sidebar_width as f64, TOOLBAR_HEIGHT, content_width, content_height);
+            let bounds = rect(
+                self.data.sidebar_width as f64,
+                TOOLBAR_HEIGHT,
+                content_width,
+                content_height,
+            );
             let _ = self.shell.set_bounds(bounds);
             #[cfg(target_os = "macos")]
-            crate::native_chrome::resize(size.width, size.height);
+            crate::native_chrome::resize(self.key, size.width, size.height);
             for tab in &self.tabs {
                 if let Some(view) = &tab.view {
                     let _ = view.set_bounds(bounds);
@@ -282,7 +344,29 @@ impl Browser {
             self.shell_visible = Some(show_shell_page);
         }
         for tab in &mut self.tabs {
-            let visible = tab.id == self.active && !show_shell_page && tab.view.is_some();
+            let visible = (tab.id == self.active || Some(tab.id) == self.split)
+                && !show_shell_page
+                && tab.view.is_some();
+            if visible {
+                if let Some(view) = &tab.view {
+                    let half = if self.split.is_some() {
+                        content_width / 2.0
+                    } else {
+                        content_width
+                    };
+                    let offset = if self.split.is_some() && Some(tab.id) == self.split_right {
+                        half
+                    } else {
+                        0.0
+                    };
+                    let _ = view.set_bounds(rect(
+                        self.data.sidebar_width as f64 + offset,
+                        TOOLBAR_HEIGHT,
+                        half,
+                        content_height,
+                    ));
+                }
+            }
             if tab.visible != visible {
                 if let Some(view) = &tab.view {
                     let _ = view.set_visible(visible);
@@ -293,6 +377,7 @@ impl Browser {
     }
 
     fn new_tab(&mut self, url: &str) -> wry::Result<()> {
+        self.split = None;
         self.new_tab_in_workspace(url, self.active_workspace)
     }
 
@@ -317,6 +402,8 @@ impl Browser {
             favicon: crate::favicon::fallback(url),
             loading: url != "about:blank",
             site_color: None,
+            pinned: false,
+            zoom: 1.0,
         });
         record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
@@ -353,21 +440,40 @@ impl Browser {
             title,
             loading: false,
             site_color: None,
+            pinned: session.pinned,
+            zoom: 1.0,
         });
     }
 
     fn sample_site_color(&self, id: u64, generation: u64) {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id && tab.generation == generation
-            && !tab.loading && (tab.url.starts_with("https://") || tab.url.starts_with("http://"))) else { return };
+        let Some(tab) = self.tabs.iter().find(|tab| {
+            tab.id == id
+                && tab.generation == generation
+                && !tab.loading
+                && (tab.url.starts_with("https://") || tab.url.starts_with("http://"))
+        }) else {
+            return;
+        };
         let Some(view) = &tab.view else { return };
         let proxy = self.proxy.clone();
-        let _ = view.evaluate_script_with_callback(include_str!("../ui/site-theme.js"), move |result| {
-            #[derive(serde::Deserialize)]
-            struct Sample { url: String, color: [u8; 3] }
-            if let Ok(sample) = serde_json::from_str::<Sample>(&result) {
-                let _ = proxy.send_event(BrowserEvent::SiteColor(id, generation, sample.url, sample.color));
-            }
-        });
+        let _ = view.evaluate_script_with_callback(
+            include_str!("../ui/site-theme.js"),
+            move |result| {
+                #[derive(serde::Deserialize)]
+                struct Sample {
+                    url: String,
+                    color: [u8; 3],
+                }
+                if let Ok(sample) = serde_json::from_str::<Sample>(&result) {
+                    let _ = proxy.send_event(BrowserEvent::SiteColor(
+                        id,
+                        generation,
+                        sample.url,
+                        sample.color,
+                    ));
+                }
+            },
+        );
     }
 
     fn build_view(&self, id: u64, generation: u64, url: &str) -> wry::Result<WebView> {
@@ -377,7 +483,17 @@ impl Browser {
         let window_proxy = self.proxy.clone();
         let download_proxy = self.proxy.clone();
         let completed_proxy = self.proxy.clone();
-        WebViewBuilder::new()
+        let builder = WebViewBuilder::new();
+        #[cfg(target_os = "macos")]
+        let builder = if self.private_mode {
+            use wry::WebViewBuilderExtMacos;
+            builder
+                .with_webview_configuration(crate::native_chrome::private_configuration(self.key))
+        } else {
+            builder
+        };
+        let view = builder
+            .with_incognito(self.private_mode)
             // Bare WKWebView omits Safari's product tokens; Google consequently
             // serves its simplified results page without the full image UI.
             .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15")
@@ -427,7 +543,10 @@ impl Browser {
             .with_download_completed_handler(move |url, _, success| {
                 let _ = completed_proxy.send_event(BrowserEvent::DownloadFinished(url, success));
             })
-            .build_as_child(&self.window)
+            .build_as_child(&self.window)?;
+        #[cfg(target_os = "macos")]
+        crate::native_chrome::attach_page(self.key, id, generation, &view);
+        Ok(view)
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -435,12 +554,20 @@ impl Browser {
     }
 
     fn activate_tab(&mut self, id: u64) -> wry::Result<()> {
+        self.split = valid_split(&self.tabs, self.active, self.split);
+        if Some(id) == self.split {
+            self.split = Some(self.active);
+        } else if id != self.active {
+            self.split = None;
+        }
+        self.panel = None;
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return Ok(());
         };
         if self.tabs[index].view.is_none() && self.tabs[index].url != "about:blank" {
             let generation = self.tabs[index].generation + 1;
             let view = self.build_view(id, generation, &self.tabs[index].url)?;
+            let _ = view.zoom(self.tabs[index].zoom);
             self.tabs[index].view = Some(view);
             self.tabs[index].generation = generation;
             self.tabs[index].loading = true;
@@ -463,6 +590,10 @@ impl Browser {
     }
 
     fn navigate_active(&mut self, url: String) {
+        self.error = None;
+        if url == "about:blank" {
+            self.split = None;
+        }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == self.active) else {
             return;
         };
@@ -506,6 +637,9 @@ impl Browser {
         let mut changed = false;
         for tab in &mut self.tabs {
             if tab.id != self.active
+                && Some(tab.id) != self.split
+                && !tab.pinned
+                && !self.private_mode
                 && tab.view.is_some()
                 && eviction_score(now.duration_since(tab.last_used), tab.activations)
                     >= IDLE_TAB_AGE.as_millis()
@@ -517,12 +651,19 @@ impl Browser {
                 changed = true;
             }
         }
-        while self.tabs.iter().filter(|tab| tab.view.is_some()).count() > MAX_LIVE_TABS {
+        while !self.private_mode
+            && self.tabs.iter().filter(|tab| tab.view.is_some()).count() > MAX_LIVE_TABS
+        {
             let candidate = self
                 .tabs
                 .iter()
                 .enumerate()
-                .filter(|(_, tab)| tab.id != self.active && tab.view.is_some())
+                .filter(|(_, tab)| {
+                    tab.id != self.active
+                        && Some(tab.id) != self.split
+                        && !tab.pinned
+                        && tab.view.is_some()
+                })
                 .max_by_key(|(_, tab)| {
                     (
                         eviction_score(now.duration_since(tab.last_used), tab.activations),
@@ -543,6 +684,9 @@ impl Browser {
     }
 
     fn close_tab(&mut self, id: u64) {
+        if self.split == Some(id) {
+            self.split = None;
+        }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
@@ -572,27 +716,200 @@ impl Browser {
                 self.switch_tab(id);
             }
         } else {
+            self.resize();
             self.refresh();
         }
     }
 
-    fn handle_command(&mut self, command: Command) {
+    pub(crate) fn handle_command(&mut self, command: Command) {
         match command {
+            Command::NewWindow { .. } => {} // Handled by the application window manager.
+            Command::Find => self.native_action("find"),
+            Command::Settings => self.native_action("settings"),
+            Command::DefaultBrowser => self.native_action("default_browser"),
+            Command::SetSettings { mut settings } => {
+                if self.private_mode {
+                    return;
+                }
+                if !matches!(
+                    settings.search_engine.as_str(),
+                    "google" | "duckduckgo" | "bing"
+                ) || !matches!(settings.appearance.as_str(), "system" | "light" | "dark")
+                {
+                    return;
+                }
+                if !settings.download_directory.is_empty()
+                    && (!std::path::Path::new(&settings.download_directory).is_absolute()
+                        || !std::path::Path::new(&settings.download_directory).is_dir())
+                {
+                    self.error = Some("Choose an existing download folder.".into());
+                    self.refresh();
+                    return;
+                }
+                settings.site_permissions.retain(|origin, policy| {
+                    url::Url::parse(origin).is_ok_and(|u| {
+                        matches!(u.scheme(), "https" | "http") && u.host_str().is_some()
+                    }) && matches!(policy.as_str(), "ask" | "deny")
+                });
+                self.data.settings = settings;
+                self.native_action("settings_saved");
+            }
+            Command::Zoom { delta } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) {
+                    tab.zoom = if delta == 0 {
+                        1.0
+                    } else {
+                        (tab.zoom + f64::from(delta.signum()) * 0.1).clamp(0.25, 3.0)
+                    };
+                    if let Some(view) = &tab.view {
+                        let _ = view.zoom(tab.zoom);
+                    }
+                }
+            }
+            Command::Print => {
+                if let Some(view) = self.active_tab().and_then(|t| t.view.as_ref()) {
+                    if let Err(e) = view.print() {
+                        self.error = Some(e.to_string());
+                    }
+                }
+            }
+            Command::DuplicateTab { id } => {
+                if let Some(url) = self.tabs.iter().find(|t| t.id == id).map(|t| t.url.clone()) {
+                    if let Err(e) = self.new_tab(&url) {
+                        self.error = Some(e.to_string());
+                    }
+                }
+            }
+            Command::TogglePin { id } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    tab.pinned = !tab.pinned;
+                }
+                self.tabs.sort_by_key(|t| !t.pinned);
+            }
+            Command::ReorderTab { id, before } => reorder_tabs(&mut self.tabs, id, before),
+            Command::CloseOtherTabs { id } => {
+                if let Some(workspace) = self.tabs.iter().find(|t| t.id == id).map(|t| t.workspace)
+                {
+                    let close: Vec<_> = self
+                        .tabs
+                        .iter()
+                        .filter(|t| t.workspace == workspace && t.id != id && !t.pinned)
+                        .map(|t| t.id)
+                        .collect();
+                    self.switch_tab(id);
+                    for other in close {
+                        self.close_tab(other);
+                    }
+                }
+            }
+            Command::SplitTab { id } => {
+                if id != self.active
+                    && self.active_tab().is_some_and(|t| t.url != "about:blank")
+                    && self.tabs.iter().any(|t| {
+                        t.id == id && t.workspace == self.active_workspace && t.url != "about:blank"
+                    })
+                {
+                    let previous = self.active;
+                    if self.activate_tab(id).is_ok() {
+                        self.active = previous;
+                        self.split = Some(id);
+                        self.split_right = Some(id);
+                        self.resize();
+                    }
+                }
+            }
+            Command::CloseSplit => {
+                self.split = None;
+                self.resize();
+            }
+            Command::FocusPane { id } => {
+                if self.split == Some(id) {
+                    let previous = self.active;
+                    self.active = id;
+                    self.split = Some(previous);
+                    self.refresh();
+                }
+            }
+            Command::PageError {
+                id,
+                generation,
+                message,
+            } => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == id && t.generation == generation)
+                {
+                    tab.loading = false;
+                    self.error = Some(message);
+                }
+            }
+            Command::DismissError => self.error = None,
+            Command::ClearSiteData => {
+                self.tabs.clear();
+                self.closed_tabs.clear();
+                self.split = None;
+                self.native_action("clear_data");
+                if let Err(e) = self.new_tab("about:blank") {
+                    self.error = Some(e.to_string());
+                }
+            }
+            Command::DownloadUpdate { download } => {
+                if let Some(existing) = self.downloads.iter_mut().find(|d| d.id == download.id) {
+                    *existing = download;
+                } else {
+                    self.downloads.insert(0, download);
+                }
+                // Active downloads remain actionable regardless of history size.
+                let mut completed = 0;
+                self.downloads.retain(|d| {
+                    if d.complete {
+                        completed += 1;
+                    }
+                    !d.complete || completed <= 100
+                });
+                if !self.private_mode {
+                    self.data.downloads = self.downloads.clone();
+                }
+            }
+            Command::DownloadAction { id, action } => {
+                if let Some(download) = self.downloads.iter().find(|d| d.id == id) {
+                    if action == "cancel" && !download.complete {
+                        self.native_action(&format!("cancel:{id}"));
+                    } else if download.complete
+                        && download.success
+                        && std::path::Path::new(&download.path).is_file()
+                    {
+                        let mut process = std::process::Command::new("/usr/bin/open");
+                        if action == "reveal" {
+                            process.arg("-R");
+                        } else if action != "open" {
+                            return;
+                        }
+                        let _ = process.arg(&download.path).spawn();
+                    }
+                }
+            }
+
             Command::SetSidebarWidth { width } => {
                 self.data.sidebar_width = width.clamp(180, 360);
                 self.last_size = None;
                 self.resize();
             }
             Command::Navigate { value } => {
-                self.navigate_active(resolve_address(&value));
+                self.navigate_active(resolve_address_with_engine(
+                    &value,
+                    &self.data.settings.search_engine,
+                ));
             }
             Command::NewTab => {
                 #[cfg(target_os = "macos")]
-                crate::native_chrome::focus_new_tab();
+                crate::native_chrome::focus_new_tab(self.key);
             }
             Command::OpenNewTab { value } => {
                 if !value.trim().is_empty() {
-                    let url = resolve_address(&value);
+                    let url =
+                        resolve_address_with_engine(&value, &self.data.settings.search_engine);
                     if let Err(error) = self.new_tab(&url) {
                         eprintln!("Cannot open tab: {error}");
                     }
@@ -604,11 +921,17 @@ impl Browser {
                 }
             }
             Command::SetNewTabPhoto { path } => {
+                if self.private_mode {
+                    return;
+                }
                 if let Err(error) = self.set_new_tab_photo(&path) {
                     eprintln!("Cannot set new tab photo: {error}");
                 }
             }
             Command::RemoveNewTabPhoto => {
+                if self.private_mode {
+                    return;
+                }
                 if let Err(error) = fs::remove_file(&self.photo_path) {
                     if error.kind() != std::io::ErrorKind::NotFound {
                         eprintln!("Cannot remove new tab photo: {error}");
@@ -770,6 +1093,7 @@ impl Browser {
 
     pub(crate) fn handle_event(&mut self, event: BrowserEvent) {
         match event {
+            BrowserEvent::Routed(_, _) => {}
             #[cfg(target_os = "macos")]
             BrowserEvent::Menu(event) => self.handle_menu(event),
             BrowserEvent::Command(command) => self.handle_command(command),
@@ -798,7 +1122,9 @@ impl Browser {
                 {
                     tab.url = url.clone();
                     tab.loading = false;
-                    self.data.visit(&url, &tab.title);
+                    if !self.private_mode {
+                        self.data.visit(&url, &tab.title);
+                    }
                     self.save();
                 } else {
                     return;
@@ -810,10 +1136,13 @@ impl Browser {
                 self.refresh();
             }
             BrowserEvent::SiteColor(id, generation, url, color) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab|
-                    tab.id == id && tab.generation == generation && tab.view.is_some()
-                        && !tab.loading && tab.url == url)
-                {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+                    tab.id == id
+                        && tab.generation == generation
+                        && tab.view.is_some()
+                        && !tab.loading
+                        && tab.url == url
+                }) {
                     tab.site_color = Some(color);
                     self.refresh();
                 }
@@ -875,6 +1204,9 @@ impl Browser {
                 self.downloads.insert(
                     0,
                     Download {
+                        id: path.clone(),
+                        path: path.clone(),
+                        progress: 0.0,
                         filename: std::path::Path::new(&path)
                             .file_name()
                             .and_then(|name| name.to_str())
@@ -922,10 +1254,16 @@ impl Browser {
     #[cfg(target_os = "macos")]
     fn handle_menu(&mut self, event: MenuEvent) {
         match event.id.0.as_str() {
+            "find" => self.handle_command(Command::Find),
+            "settings" => self.handle_command(Command::Settings),
+            "zoom_in" => self.handle_command(Command::Zoom { delta: 1 }),
+            "zoom_out" => self.handle_command(Command::Zoom { delta: -1 }),
+            "zoom_reset" => self.handle_command(Command::Zoom { delta: 0 }),
+            "print" => self.handle_command(Command::Print),
             "address" => {
-                crate::native_chrome::focus_address();
+                crate::native_chrome::focus_address(self.key);
             }
-            "switcher" => crate::native_chrome::focus_switcher(),
+            "switcher" => crate::native_chrome::focus_switcher(self.key),
             "new_tab" => self.handle_command(Command::NewTab),
             "reopen_tab" => self.handle_command(Command::ReopenClosedTab),
             "close_tab" => self.handle_command(Command::CloseTab { id: self.active }),
@@ -967,35 +1305,43 @@ impl Browser {
         self.save_due
     }
 
-    pub(crate) fn flush_save_if_due(&mut self) {
-        if self.save_due.is_some_and(|due| Instant::now() >= due) {
-            self.flush_save();
+    pub(crate) fn sessions(&self) -> Vec<SessionTab> {
+        if self.private_mode {
+            return Vec::new();
         }
-    }
-
-    pub(crate) fn flush_save(&mut self) {
-        if self.save_due.take().is_none() {
-            return;
-        }
-        self.data.active_workspace = self.active_workspace;
-        self.data.session_tabs = self
-            .tabs
+        self.tabs
             .iter()
             .map(|tab| SessionTab {
                 url: tab.url.clone(),
                 workspace: tab.workspace,
+                pinned: tab.pinned,
             })
-            .collect();
-        self.data.active_tab_index = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == self.active)
-            .unwrap_or(0);
-        if let Err(error) = self.data.save(&self.data_path) {
-            eprintln!("Cannot save browser data: {error}");
-        }
+            .collect()
     }
-
+    pub(crate) fn active_index(&self) -> usize {
+        self.tabs
+            .iter()
+            .position(|t| t.id == self.active)
+            .unwrap_or(0)
+    }
+    pub(crate) fn active_workspace(&self) -> u64 {
+        self.active_workspace
+    }
+    fn native_action(&self, action: &str) {
+        #[cfg(target_os = "macos")]
+        crate::native_chrome::action(self.key, self.active, action);
+    }
+    pub(crate) fn sync_data(&mut self, data: &BrowserData) {
+        self.data.settings = data.settings.clone();
+        if !self.private_mode {
+            self.data.bookmarks = data.bookmarks.clone();
+            self.data.history = data.history.clone();
+            self.data.workspaces = data.workspaces.clone();
+            self.data.downloads = data.downloads.clone();
+            self.downloads = data.downloads.clone();
+        }
+        self.refresh();
+    }
     fn set_new_tab_photo(&mut self, source: &str) -> std::io::Result<()> {
         let source = PathBuf::from(source);
         let metadata = fs::metadata(&source)?;
@@ -1024,9 +1370,12 @@ impl Browser {
         Ok(())
     }
 
-    fn refresh(&self) {
+    pub(crate) fn refresh(&self) {
         let active = self.active_tab();
         let state = ShellState {
+            private_mode: self.private_mode,
+            error: self.error.as_deref(),
+            settings: &self.data.settings,
             tabs: self
                 .tabs
                 .iter()
@@ -1035,9 +1384,14 @@ impl Browser {
                     workspace: tab.workspace,
                     url: &tab.url,
                     title: &tab.title,
-                    favicon: tab.favicon.as_deref(),
+                    favicon: if self.private_mode {
+                        None
+                    } else {
+                        tab.favicon.as_deref()
+                    },
                     loading: tab.loading,
                     sleeping: tab.view.is_none() && tab.url != "about:blank",
+                    pinned: tab.pinned,
                 })
                 .collect(),
             workspaces: &self.data.workspaces,
@@ -1076,13 +1430,21 @@ impl Browser {
         };
         if let Ok(json) = serde_json::to_string(&state) {
             #[cfg(target_os = "macos")]
-            crate::native_chrome::update(&json);
+            crate::native_chrome::update(self.key, &json);
             let _ = self
                 .shell
                 .evaluate_script(&format!("window.renderState({json})"));
         }
         if let Some(tab) = active {
-            self.window.set_title(&format!("{} — Moth", tab.title));
+            self.window.set_title(&format!(
+                "{} — Moth{}",
+                tab.title,
+                if self.private_mode {
+                    " — Private"
+                } else {
+                    ""
+                }
+            ));
         }
     }
 }
@@ -1113,11 +1475,17 @@ fn photo_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn valid_split(tabs: &[Tab], active: u64, split: Option<u64>) -> Option<u64> {
+    let active = tabs.iter().find(|tab| tab.id == active)?;
+    let other = tabs.iter().find(|tab| Some(tab.id) == split)?;
+    (active.id != other.id && active.workspace == other.workspace).then_some(other.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_tab_index, eviction_score, photo_mime, record_tab_switch, shortcut_tab_index, Tab,
-        IDLE_TAB_AGE,
+        adjacent_tab_index, eviction_score, photo_mime, record_tab_switch, reorder_tabs,
+        shortcut_tab_index, valid_split, Tab, IDLE_TAB_AGE,
     };
     use std::time::{Duration, Instant};
 
@@ -1135,7 +1503,38 @@ mod tests {
             favicon: None,
             loading: false,
             site_color: None,
+            pinned: false,
+            zoom: 1.0,
         }
+    }
+
+    #[test]
+    fn split_requires_two_live_tabs_in_the_same_workspace() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now)];
+        assert_eq!(valid_split(&tabs, 1, Some(2)), Some(2));
+        assert_eq!(valid_split(&tabs[1..], 1, Some(2)), None);
+        assert_eq!(valid_split(&tabs[..1], 1, Some(2)), None);
+        assert_eq!(valid_split(&tabs, 1, Some(1)), None);
+        tabs[1].workspace = 2;
+        assert_eq!(valid_split(&tabs, 1, Some(2)), None);
+        assert_eq!(valid_split(&tabs, 2, Some(1)), None);
+    }
+
+    #[test]
+    fn tab_reordering_preserves_pin_and_workspace_boundaries() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now), tab(3, now), tab(4, now)];
+        tabs[0].pinned = true;
+        tabs[3].workspace = 2;
+        reorder_tabs(&mut tabs, 3, 2);
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [1, 3, 2, 4]);
+        for (id, before) in [(2, 1), (4, 2), (2, 2), (99, 2), (2, 99)] {
+            reorder_tabs(&mut tabs, id, before);
+            assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [1, 3, 2, 4]);
+        }
+        reorder_tabs(&mut tabs, 2, 3);
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [1, 2, 3, 4]);
     }
 
     #[test]

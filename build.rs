@@ -12,6 +12,7 @@ fn main() {
             "MothChrome",
         ])
         .arg("native/Chrome.swift")
+        .arg("native/BrowserFeatures.swift")
         .arg("-o")
         .arg(out.join("libmoth_chrome.a"))
         .status()
@@ -24,6 +25,7 @@ fn main() {
     println!("cargo:rustc-link-arg=-L/usr/lib/swift");
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     println!("cargo:rerun-if-changed=native/Chrome.swift");
+    println!("cargo:rerun-if-changed=native/BrowserFeatures.swift");
 }
 
 #[cfg(not(target_os = "macos"))]

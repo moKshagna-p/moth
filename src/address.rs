@@ -1,6 +1,10 @@
 use url::Url;
 
 pub fn resolve_address(input: &str) -> String {
+    resolve_address_with_engine(input, "google")
+}
+
+pub fn resolve_address_with_engine(input: &str, engine: &str) -> String {
     let input = input.trim();
     if input.is_empty() {
         return "about:blank".into();
@@ -24,12 +28,37 @@ pub fn resolve_address(input: &str) -> String {
     let query: String = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("q", input)
         .finish();
-    format!("https://www.google.com/search?{query}")
+    let base = match engine {
+        "duckduckgo" => "https://duckduckgo.com/",
+        "bing" => "https://www.bing.com/search",
+        _ => "https://www.google.com/search",
+    };
+    format!("{base}?{query}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_search_engine_encodes_queries_and_preserves_urls() {
+        assert_eq!(
+            resolve_address_with_engine("a & b", "duckduckgo"),
+            "https://duckduckgo.com/?q=a+%26+b"
+        );
+        assert_eq!(
+            resolve_address_with_engine("a & b", "bing"),
+            "https://www.bing.com/search?q=a+%26+b"
+        );
+        assert_eq!(
+            resolve_address_with_engine("a & b", "unknown"),
+            "https://www.google.com/search?q=a+%26+b"
+        );
+        assert_eq!(
+            resolve_address_with_engine("https://example.com/", "bing"),
+            "https://example.com/"
+        );
+    }
 
     #[test]
     fn address_resolves_sites_local_hosts_and_searches() {
