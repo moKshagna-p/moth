@@ -1,5 +1,7 @@
 name: macOS checks
 on:
+  workflow_call:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -7,7 +9,18 @@ permissions:
   contents: read
 jobs:
   verify:
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            architecture: arm64
+          - runner: macos-26-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -20,8 +33,15 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: node --test ui/*.test.cjs
+      - name: Native XCTest suite
+        run: swift test --package-path native
       - run: sh scripts/build-app.sh
+      - run: sh scripts/build-dmg.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: Moth-macOS-development
-          path: target/release/Moth.zip
+          name: Moth-macOS-${{ matrix.architecture }}
+          path: |
+            target/release/Moth.zip
+            target/release/*.dmg
+            target/release/*.sha256
+          if-no-files-found: error

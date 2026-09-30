@@ -1,0 +1,52 @@
+name: Beta release
+on:
+  push:
+    tags: ['v*-beta.*']
+permissions:
+  contents: read
+concurrency:
+  group: beta-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BETA_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Moth-macOS-*
+          path: artifacts
+      - name: Publish tested beta DMGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BETA_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+          shopt -s nullglob
+          files=(artifacts/*/*.dmg artifacts/*/*.sha256)
+          [[ ${#files[@]} -eq 4 ]]
+          for directory in artifacts/*; do
+            (cd "$directory" && sha256sum --check ./*.sha256)
+          done
+          cat > notes.md <<'NOTES'
+          Moth beta for macOS 26 or later.
+
+          Choose arm64 for Apple Silicon (M-series) or x86_64 for Intel.
+          Open the DMG and drag Moth into Applications.
+
+          This experimental beta is ad hoc signed and is not Apple-notarized.
+          macOS may block the first launch. If you trust this download, use
+          System Settings → Privacy & Security → Open Anyway after trying to open it.
+
+          Release checks: native XCTest, Rust tests, rustfmt, Clippy, and JavaScript tests on both architectures.
+          SHA-256 checksum files are included alongside the DMGs.
+          NOTES
+          gh release create "$BETA_TAG" "${files[@]}" --verify-tag --prerelease --latest=false \
+            --title "Moth $BETA_TAG" --notes-file notes.md

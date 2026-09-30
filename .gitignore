@@ -1,3 +1,4 @@
 /target/
+/native/.build/
 /.codex/
 .DS_Store

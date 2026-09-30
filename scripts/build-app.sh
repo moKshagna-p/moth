@@ -2,7 +2,7 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-cargo build --release
+cargo build --release --locked
 
 bundle="target/release/Moth.app"
 mkdir -p "$bundle/Contents/MacOS"
