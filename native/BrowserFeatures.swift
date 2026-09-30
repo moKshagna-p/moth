@@ -62,7 +62,7 @@ struct BrowserSettings: Codable {
                     model.send("set_settings", ["settings": value])
                 }
             }.keyboardShortcut(.defaultAction).disabled(isPrivate) }
-        }.formStyle(.grouped).padding().frame(width: 540, height: 550)
+        }.buttonStyle(.glass).formStyle(.grouped).padding().frame(width: 540, height: 550)
     }
 }
 
@@ -77,7 +77,7 @@ struct BrowserSettings: Codable {
             Text(status).font(.caption).accessibilityLabel(status)
             Button("Previous") { find(true) }.keyboardShortcut("g", modifiers: [.command, .shift])
             Button("Next") { find(false) }.keyboardShortcut("g", modifiers: .command)
-        }.padding().frame(width: 500).onAppear { focused = true }
+        }.buttonStyle(.glass).padding().frame(width: 500).onAppear { focused = true }
     }
     private func find(_ backwards: Bool) {
         guard !query.isEmpty else { status = ""; return }

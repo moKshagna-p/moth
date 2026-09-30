@@ -196,19 +196,18 @@ private struct SymbolButton: View {
     let symbol: String
     let label: String
     var enabled = true
+    var size: CGFloat = 30
     var action: () -> Void
-    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .medium))
-                .frame(width: 30, height: 30)
-                .glassEffect(hovering && enabled ? .regular.interactive() : .identity, in: Circle())
+                .frame(width: size, height: size)
+                .glassEffect(.regular.interactive(enabled), in: Circle())
         }
         .buttonStyle(.plain)
         .foregroundStyle((colorScheme == .dark ? Color.white : Color(white: 0.08)).opacity(enabled ? 1 : 0.4))
-        .onHover { hovering = $0 }
         .disabled(!enabled)
         .help(label)
         .accessibilityLabel(label)
@@ -442,12 +441,14 @@ private struct SidebarView: View {
                 .padding(.leading, 12)
                 .frame(height: 36)
                 .contentShape(Rectangle())
+                .glassEffect(.regular.tint(selected ? model.chromeInk.opacity(0.12) : .clear).interactive(), in: Capsule())
             }
             .buttonStyle(.plain)
             .help(tab.sleeping ? "Sleeping tab — reloads when opened" : tab.url)
             Button { model.send("close_tab", ["id": tab.id]) } label: {
                 Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
                     .frame(width: 22, height: 22)
+                    .glassEffect(.regular.interactive(), in: Circle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(model.chromeMuted)
@@ -478,7 +479,7 @@ private struct SidebarView: View {
             .dropDestination(for: String.self) { ids, _ in
                 guard let value = ids.first, let id = UInt64(value), id != tab.id else { return false }
                 model.send("reorder_tab", ["id": id, "before": tab.id]); return true
-            }.glassEffect(selected ? .regular.interactive() : .identity, in: Capsule())
+            }
     }
 
     private var workspaceSwitcher: some View {
@@ -514,7 +515,8 @@ private struct SidebarView: View {
                     Circle().frame(width: 5, height: 5)
                     Text(model.activeWorkspace?.name ?? "Workspace").font(.system(size: 11)).lineLimit(1)
                     Image(systemName: "chevron.down").font(.system(size: 8))
-                }.frame(height: 30)
+                }.padding(.horizontal, 9).frame(height: 30)
+                    .glassEffect(.regular.interactive(), in: Capsule())
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
@@ -597,7 +599,7 @@ private struct CommandPalette: View {
     private var paletteHeight: CGFloat {
         let visibleMatches = min(matches.count, 5)
         let actionHeight: CGFloat = model.paletteMode == .newTab ? 49 : 0
-        return 60 + actionHeight + CGFloat(visibleMatches) * 54 + (visibleMatches > 0 ? 16 : 0)
+        return 61 + actionHeight + CGFloat(visibleMatches) * 54 + (visibleMatches > 0 ? 16 : 0)
     }
 
     var body: some View {
@@ -714,35 +716,41 @@ private struct PaletteOverlay: View {
 private struct PhotoControls: View {
     @ObservedObject var model: ChromeModel
     @State private var positioning = false
+
     var body: some View {
-        HStack(spacing: 2) {
-            Button { model.choosePhoto() } label: {
-                Image(systemName: model.snapshot?.has_photo == true ? "photo.badge.arrow.down" : "photo.badge.plus")
-                    .font(.system(size: 15, weight: .medium))
-                    .frame(width: 38, height: 38)
-            }
-            .help(model.snapshot?.has_photo == true ? "Change new tab photo" : "Choose new tab photo")
-            .accessibilityLabel(model.snapshot?.has_photo == true ? "Change new tab photo" : "Choose new tab photo")
+        HStack(spacing: 0) {
+            photoButton(
+                symbol: model.snapshot?.has_photo == true ? "photo.badge.arrow.down" : "photo.badge.plus",
+                label: model.snapshot?.has_photo == true ? "Change new tab photo" : "Choose new tab photo"
+            ) { model.choosePhoto() }
             if model.snapshot?.has_photo == true {
-                Button { positioning = true } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 14, weight: .medium))
-                        .frame(width: 32, height: 38)
+                photoButton(symbol: "slider.horizontal.3", label: "Position new tab photo") {
+                    positioning = true
                 }
-                .help("Position new tab photo")
-                .accessibilityLabel("Position new tab photo")
                 .popover(isPresented: $positioning) { PhotoPositionEditor(model: model) }
-                Button { model.send("remove_new_tab_photo") } label: {
-                    Image(systemName: "xmark").font(.system(size: 12, weight: .medium))
-                        .frame(width: 32, height: 38)
+                photoButton(symbol: "xmark", label: "Remove new tab photo") {
+                    model.send("remove_new_tab_photo")
                 }
-                .help("Remove new tab photo")
-                .accessibilityLabel("Remove new tab photo")
             }
         }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(.regularMaterial, in: Capsule())
+        .glassEffect(.regular.tint(.white.opacity(0.08)).interactive(), in: Capsule())
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func photoButton(symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
         .buttonStyle(.plain)
-        .foregroundStyle(ink)
-        .glassEffect(.regular.interactive(), in: Capsule())
+        .help(label)
+        .accessibilityLabel(label)
     }
 }
 
@@ -773,8 +781,7 @@ private struct PhotoPositionEditor: View {
                 horizontal = 50
                 vertical = 50
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(.glass)
         }
         .padding(18)
         .frame(width: 290)
@@ -840,7 +847,7 @@ private struct PhotoPositionEditor: View {
         chrome?.frame = parent.bounds
         chrome?.appearance = NSAppearance(named: model.chromeScheme == .dark ? .darkAqua : .aqua)
         palette?.frame = parent.bounds
-        photoControls?.frame = CGRect(x: max(model.sidebarWidth, width - 150), y: parent.isFlipped ? height - 66 : 22, width: 128, height: 44)
+        photoControls?.frame = CGRect(x: max(model.sidebarWidth, width - 130), y: parent.isFlipped ? height - 62 : 22, width: 108, height: 40)
     }
 
     func setPaletteVisible(_ visible: Bool) {

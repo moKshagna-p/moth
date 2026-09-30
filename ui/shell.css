@@ -6,12 +6,26 @@
   --muted: #777d74;
   --accent: #4b644f;
   --line: #dedfd8;
+  --glass: rgba(255, 255, 255, .58);
+  --glass-hover: rgba(255, 255, 255, .78);
+  --glass-edge: rgba(255, 255, 255, .8);
 }
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { color: var(--ink); background: var(--paper); font-size: 13px; }
 button, input { font: inherit; }
-button { border: 0; cursor: pointer; }
+button {
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--glass);
+  color: var(--ink);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 2px 6px rgba(0, 0, 0, .07);
+  cursor: pointer;
+}
+button:hover { background: var(--glass-hover); }
+button:disabled { cursor: default; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -20,7 +34,6 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 #start.open { display: block; }
 #start-photo { display: none; position: absolute; left: calc(-1 * var(--sidebar-width, 220px)); top: -50px; width: calc(100% + var(--sidebar-width, 220px)); height: calc(100% + 50px); object-fit: cover; object-position: center; }
 #start-photo.visible { display: block; }
-.entry:hover { background: #e9ede7; }
 .site-tile { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 7px; background: #e6eae2; color: var(--accent); font-size: 12px; font-weight: 650; text-transform: uppercase; }
 .entry-text { min-width: 0; flex: 1; }
 .entry-title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; }
@@ -31,10 +44,10 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 .panel-head { display: flex; align-items: start; justify-content: space-between; gap: 20px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
 .panel-head h1 { margin: 0; font: 400 48px/1.1 Georgia, "Times New Roman", serif; letter-spacing: -.045em; }
 .panel-actions { display: flex; align-items: center; gap: 8px; }
-.panel-actions button { padding: 7px 10px; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; }
-.panel-actions button:hover { background: #e9ede7; color: var(--ink); }
+.panel-actions button { padding: 7px 10px; border-radius: 999px; color: var(--ink); font-size: 12px; }
+.panel-actions button:hover { background: var(--glass-hover); }
 .panel-list { margin-top: 8px; }
-.entry { width: 100%; min-height: 64px; display: flex; align-items: center; gap: 13px; padding: 8px 6px; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; }
+.entry { width: 100%; min-height: 64px; display: flex; align-items: center; gap: 13px; padding: 8px 12px; margin-bottom: 8px; border-radius: 16px; color: var(--ink); text-align: left; }
 .entry-chevron { color: #a5ada4; font-size: 18px; }
 .empty { padding: 32px 0; color: var(--muted); font-size: 13px; }
 
@@ -44,10 +57,20 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 
 .download-row { display: flex; align-items: center; gap: 12px; }
 .download-row .entry { flex: 1; min-width: 0; opacity: 1; cursor: default; }
-.download-row > button { padding: 8px; border-radius: 6px; }
+.download-row > button { padding: 8px 12px; border-radius: 999px; }
 .download-row progress { width: 90px; }
 @media (prefers-color-scheme: dark) {
-  :root { --paper: #202321; --ink: #f1f4ed; --muted: #b7c1b5; --line: #3b433b; }
+  :root { --paper: #202321; --ink: #f1f4ed; --muted: #b7c1b5; --line: #3b433b; --glass: rgba(70, 77, 72, .58); --glass-hover: rgba(85, 94, 87, .78); --glass-edge: rgba(255, 255, 255, .18); }
   #start { background: #202321; }
-  .entry:hover { background: #303730; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root { --glass: #eef0eb; --glass-hover: #e2e7df; }
+  button { backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (prefers-reduced-transparency: reduce) and (prefers-color-scheme: dark) {
+  :root { --glass: #363d37; --glass-hover: #454f47; }
+}
+@media (prefers-contrast: more) {
+  button { border-color: var(--ink); }
 }
