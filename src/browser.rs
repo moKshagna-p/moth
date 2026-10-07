@@ -9,6 +9,7 @@ use muda::MenuEvent;
 use serde::Serialize;
 use std::{
     borrow::Cow,
+    cell::RefCell,
     cmp::Reverse,
     fs,
     path::PathBuf,
@@ -166,6 +167,7 @@ pub(crate) struct Browser {
     split: Option<u64>,
     split_right: Option<u64>,
     split_ratio: f64,
+    last_snapshot: RefCell<String>,
     pub(crate) error: Option<String>,
     shell: WebView,
     tabs: Vec<Tab>,
@@ -256,6 +258,7 @@ impl Browser {
             split: None,
             split_right: None,
             split_ratio: 0.5,
+            last_snapshot: RefCell::new(String::new()),
             error: None,
             downloads: if private_mode {
                 Vec::new()
@@ -378,7 +381,7 @@ impl Browser {
                         self.split_ratio,
                         tab.viewport,
                     );
-                    {
+                    if tab.bounds != Some(bounds) {
                         #[cfg(target_os = "macos")]
                         crate::native_chrome::page_layout(self.key, tab.id, bounds);
                         #[cfg(not(target_os = "macos"))]
@@ -1655,10 +1658,15 @@ impl Browser {
         };
         if let Ok(json) = serde_json::to_string(&state) {
             #[cfg(target_os = "macos")]
-            crate::native_chrome::update(self.key, &json);
-            let _ = self
-                .shell
-                .evaluate_script(&format!("window.renderState({json})"));
+            if *self.last_snapshot.borrow() != json {
+                crate::native_chrome::update(self.key, &json);
+                *self.last_snapshot.borrow_mut() = json.clone();
+            }
+            if self.shell_visible == Some(true) {
+                let _ = self
+                    .shell
+                    .evaluate_script(&format!("window.renderState({json})"));
+            }
         }
         if let Some(tab) = active {
             self.window.set_title(&format!(

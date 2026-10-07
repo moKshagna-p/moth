@@ -77,7 +77,7 @@ struct ChromeSnapshot: Decodable {
     @Published var paletteSelection = 0
     @Published var renamingWorkspace = false
     @Published var workspaceName = ""
-    @Published var windowSize = CGSize(width: 1000, height: 768) { didSet { updateContrast() } }
+    @Published var windowSize = CGSize(width: 1000, height: 768) { didSet { if oldValue != windowSize { updateContrast() } } }
     @Published var chromeScheme: ColorScheme = .light
     private var appearanceObservation: NSKeyValueObservation?
 
@@ -109,7 +109,8 @@ struct ChromeSnapshot: Decodable {
         let cropChanged = snapshot?.photo_focus_x != next.photo_focus_x || snapshot?.photo_focus_y != next.photo_focus_y
         let photoChanged = next.photo_version != loadedPhotoVersion
         let themeChanged = snapshot?.site_color != next.site_color || snapshot?.settings.appearance != next.settings.appearance
-        sidebarWidth = CGFloat(next.sidebar_width ?? 220)
+        let nextWidth = CGFloat(next.sidebar_width ?? 220)
+        if sidebarWidth != nextWidth { sidebarWidth = nextWidth }
         snapshot = next
         if paletteMode != nil { rebuildPalette(reset: false) }
         if next.photo_version != loadedPhotoVersion {
@@ -119,7 +120,8 @@ struct ChromeSnapshot: Decodable {
         }
         if photoChanged || cropChanged || themeChanged { updateContrast() }
         if !editingAddress {
-            address = activeTab?.url == "about:blank" ? "" : activeTab?.url ?? ""
+            let nextAddress = activeTab?.url == "about:blank" ? "" : activeTab?.url ?? ""
+            if address != nextAddress { address = nextAddress }
         }
     }
 
@@ -875,7 +877,8 @@ private struct PhotoPositionEditor: View {
     }
     func resize(_ width: CGFloat, _ height: CGFloat) {
         guard let parent else { return }
-        model.windowSize = CGSize(width: width, height: height)
+        let nextSize = CGSize(width: width, height: height)
+        if model.windowSize != nextSize { model.windowSize = nextSize }
         chrome?.frame = parent.bounds
         chrome?.appearance = NSAppearance(named: model.chromeScheme == .dark ? .darkAqua : .aqua)
         developerOverlay?.frame = parent.bounds
