@@ -242,16 +242,21 @@ enum PaletteMode: Equatable { case newTab, switcher }
 
 private struct SymbolButton: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let symbol: String
     let label: String
     var enabled = true
     var size: CGFloat = 30
+    var spinning = false
+    var status = ""
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
+            Image(systemName: spinning && reduceMotion ? "hourglass" : symbol)
                 .font(.system(size: 15, weight: .medium))
+                .symbolEffect(.rotate.clockwise.wholeSymbol, options: .repeating,
+                              isActive: spinning && !reduceMotion)
                 .frame(width: size, height: size)
                 .glassEffect(.regular.interactive(enabled), in: Circle())
         }
@@ -260,6 +265,52 @@ private struct SymbolButton: View {
         .disabled(!enabled)
         .help(label)
         .accessibilityLabel(label)
+        .accessibilityValue(status)
+    }
+}
+
+private struct ReloadButton: View {
+    @ObservedObject var model: ChromeModel
+    @State private var showingActivity = false
+    @State private var started: ContinuousClock.Instant?
+    @State private var feedbackTab: UInt64?
+
+    private struct LoadState: Equatable {
+        let tab: UInt64?
+        let loading: Bool
+    }
+
+    var body: some View {
+        let state = LoadState(tab: model.activeTab?.id, loading: model.activeTab?.loading == true)
+        SymbolButton(symbol: "arrow.clockwise", label: "Reload (⌘R)",
+                     spinning: showingActivity, status: state.loading ? "Reloading" : "") {
+            model.send("reload")
+        }
+        .task(id: state) { await updateFeedback(state) }
+    }
+
+    private func updateFeedback(_ state: LoadState) async {
+        if feedbackTab != state.tab {
+            feedbackTab = state.tab
+            started = nil
+            showingActivity = false
+        }
+        if state.loading {
+            if !showingActivity { started = .now }
+            showingActivity = true
+        } else {
+            // Keep fast, cached reloads visible without delaying the page itself.
+            if let started {
+                let remaining = Duration.milliseconds(600) - started.duration(to: .now)
+                if remaining > .zero {
+                    do { try await Task.sleep(for: remaining) }
+                    catch { return }
+                }
+            }
+            guard !Task.isCancelled else { return }
+            showingActivity = false
+            started = nil
+        }
     }
 }
 
@@ -634,7 +685,7 @@ private struct ToolbarView: View {
             HStack(spacing: 10) {
                 SymbolButton(symbol: "chevron.left", label: "Back (⌘[)", enabled: model.snapshot?.can_go_back ?? false) { model.send("back") }
                 SymbolButton(symbol: "chevron.right", label: "Forward (⌘])", enabled: model.snapshot?.can_go_forward ?? false) { model.send("forward") }
-                SymbolButton(symbol: "arrow.clockwise", label: "Reload (⌘R)") { model.send("reload") }
+                ReloadButton(model: model)
             }
             Spacer(minLength: 8)
 

@@ -1211,9 +1211,16 @@ impl Browser {
                 }
             }
             Command::Reload => {
-                if let Some(tab) = self.active_tab() {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) {
+                    tab.page_error = None;
                     if let Some(view) = &tab.view {
-                        let _ = view.reload();
+                        match view.reload() {
+                            Ok(()) => tab.loading = true,
+                            Err(error) => {
+                                tab.loading = false;
+                                tab.page_error = Some(format!("Cannot reload this page: {error}"));
+                            }
+                        }
                     }
                 }
             }
