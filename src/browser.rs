@@ -529,12 +529,13 @@ impl Browser {
         } else {
             builder
         };
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_url(url);
         let view = builder
             .with_incognito(self.private_mode)
             // Bare WKWebView omits Safari's product tokens; Google consequently
             // serves its simplified results page without the full image UI.
             .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15")
-            .with_url(url)
             .with_devtools(true)
             .with_visible(false)
             .with_bounds(rect(
@@ -583,7 +584,11 @@ impl Browser {
             })
             .build_as_child(&self.window)?;
         #[cfg(target_os = "macos")]
-        crate::native_chrome::attach_page(self.key, id, generation, &view);
+        {
+            crate::native_chrome::attach_page(self.key, id, generation, &view, &self.data.settings);
+            // Install the navigation gate before the first request, including restored/private tabs.
+            view.load_url(url)?;
+        }
         Ok(view)
     }
 
@@ -966,6 +971,14 @@ impl Browser {
                         matches!(u.scheme(), "https" | "http") && u.host_str().is_some()
                     }) && matches!(policy.as_str(), "ask" | "deny")
                 });
+                settings.ad_block_exceptions = settings
+                    .ad_block_exceptions
+                    .iter()
+                    .filter_map(|host| crate::data::ad_block_host(host))
+                    .collect();
+                settings.ad_block_exceptions.sort();
+                settings.ad_block_exceptions.dedup();
+                settings.ad_block_exceptions.truncate(256);
                 self.data.settings = settings;
                 self.native_action("settings_saved");
             }

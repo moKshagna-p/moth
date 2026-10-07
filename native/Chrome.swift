@@ -720,6 +720,7 @@ private struct ToolbarView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 10) {
+                AdBlockMenu(model: model)
                 DeveloperMenu(model: model)
                 SymbolButton(symbol: model.snapshot?.bookmarked == true ? "star.fill" : "star", label: "Bookmark (⌘D)") { model.send("toggle_bookmark") }
                 SymbolButton(symbol: "magnifyingglass", label: "Quick Switch (⌘K)") { model.showSwitcher() }

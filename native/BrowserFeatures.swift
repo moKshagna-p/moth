@@ -3,11 +3,28 @@ import SwiftUI
 import WebKit
 
 struct BrowserSettings: Codable {
-    var search_engine: String
-    var download_directory: String
-    var restore_session: Bool
-    var appearance: String
-    var site_permissions: [String: String]
+    var search_engine = "google"
+    var download_directory = ""
+    var restore_session = true
+    var appearance = "system"
+    var site_permissions: [String: String] = [:]
+    var ad_blocking = true
+    var ad_block_exceptions: [String] = []
+    init() {}
+    enum CodingKeys: String, CodingKey {
+        case search_engine, download_directory, restore_session, appearance, site_permissions, ad_blocking, ad_block_exceptions
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        search_engine = try values.decodeIfPresent(String.self, forKey: .search_engine) ?? "google"
+        download_directory = try values.decodeIfPresent(String.self, forKey: .download_directory) ?? ""
+        restore_session = try values.decodeIfPresent(Bool.self, forKey: .restore_session) ?? true
+        appearance = try values.decodeIfPresent(String.self, forKey: .appearance) ?? "system"
+        site_permissions = try values.decodeIfPresent([String: String].self, forKey: .site_permissions) ?? [:]
+        ad_blocking = try values.decodeIfPresent(Bool.self, forKey: .ad_blocking) ?? true
+        ad_block_exceptions = try values.decodeIfPresent([String].self, forKey: .ad_block_exceptions) ?? []
+    }
+    var adPreferences: AdBlockPreferences { AdBlockPreferences(enabled: ad_blocking, exceptions: ad_block_exceptions.sorted()) }
 }
 
 @MainActor struct SettingsView: View {
@@ -38,6 +55,12 @@ struct BrowserSettings: Codable {
             }
             }.disabled(isPrivate)
             Section("Privacy") {
+                Toggle("Block ads", isOn: $settings.ad_blocking).disabled(isPrivate)
+                Text("Built-in filters block common third-party ad networks. Use the toolbar shield to pause for a website. Filters stay on your Mac.").font(.caption)
+                if !settings.ad_block_exceptions.isEmpty {
+                    Text("Paused on " + settings.ad_block_exceptions.joined(separator: ", ")).font(.caption).lineLimit(2)
+                    Button("Reset ad blocking exceptions") { settings.ad_block_exceptions = [] }.disabled(isPrivate)
+                }
                 Text("Private windows keep history and website storage in memory. Files you download remain on disk.")
                     .font(.caption)
                 if let origin = model.activeTab.flatMap({ URL(string: $0.url) }).flatMap(BrowserFeatures.origin) {
@@ -62,7 +85,7 @@ struct BrowserSettings: Codable {
                     model.send("set_settings", ["settings": value])
                 }
             }.keyboardShortcut(.defaultAction).disabled(isPrivate) }
-        }.buttonStyle(.glass).formStyle(.grouped).padding().frame(width: 540, height: 550)
+        }.buttonStyle(.glass).formStyle(.grouped).padding().frame(width: 540, height: 650)
     }
 }
 
@@ -142,6 +165,7 @@ struct BrowserSettings: Codable {
         prunePages()
         if let tab = findTabs[id], tab != model.snapshot?.active || model.snapshot?.panel != nil { closeFind(id) }
         for tab in model.snapshot?.tabs ?? [] {
+            if let preferences = model.snapshot?.settings.adPreferences { pages["\(id):\(tab.id)"]?.updateAdBlocking(preferences) }
             if let page = pages["\(id):\(tab.id)"], page.mediaSuspended != tab.media_suspended {
                 page.mediaSuspended = tab.media_suspended
                 page.webView?.setAllMediaPlaybackSuspended(tab.media_suspended, completionHandler: nil)
@@ -245,7 +269,7 @@ struct BrowserSettings: Codable {
         case "settings":
             if let existing = settingsWindows[window], existing.isVisible { existing.makeKeyAndOrderFront(nil); return }
             guard let settings = model.snapshot?.settings else { return }
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 550), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 650), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             panel.title = "Moth Settings"; panel.isReleasedWhenClosed = false
             panel.contentView = NSHostingView(rootView: SettingsView(model: model, settings: settings))
             panel.center(); panel.makeKeyAndOrderFront(nil); settingsWindows[window] = panel
@@ -301,6 +325,8 @@ struct BrowserSettings: Codable {
     var focusObserver: Any?
     var playing = false
     var mediaSuspended = false
+    var adPreferences = AdBlockPreferences()
+    var installedAdRules: WKContentRuleList?
     init(window: UInt64, id: UInt64, generation: UInt64, webView: WKWebView) {
         self.window = window; self.id = id; self.generation = generation; self.webView = webView
         navigation = webView.navigationDelegate; ui = webView.uiDelegate
@@ -329,6 +355,52 @@ struct BrowserSettings: Codable {
         if navigation?.responds(to: selector) == true { return navigation }
         if ui?.responds(to: selector) == true { return ui }
         return super.forwardingTarget(for: selector)
+    }
+    func prepareAdBlocking(completion: @escaping (Bool) -> Void) {
+        let requested = adPreferences
+        AdBlocker.shared.rules(for: requested) { [weak self] result in
+            guard let self, let view = self.webView else { completion(false); return }
+            // A settings change can arrive while WebKit is compiling. Never apply stale rules.
+            guard self.adPreferences == requested else { self.prepareAdBlocking(completion: completion); return }
+            switch result {
+            case .success(let list):
+                let controller = view.configuration.userContentController
+                if self.installedAdRules !== list {
+                    if let previous = self.installedAdRules { controller.remove(previous) }
+                    if let list { controller.add(list) }
+                    self.installedAdRules = list
+                }
+                completion(true)
+            case .failure:
+                completion(false)
+            }
+        }
+    }
+    func updateAdBlocking(_ preferences: AdBlockPreferences) {
+        guard adPreferences != preferences else { return }
+        let old = adPreferences
+        adPreferences = preferences
+        let host = webView?.url?.host
+        let reload = old.blocks(host: host) != preferences.blocks(host: host)
+        prepareAdBlocking { [weak self] success in
+            guard let self, success, self.adPreferences == preferences, reload,
+                  self.webView?.url?.host == host else { return }
+            self.webView?.reload()
+        }
+    }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        prepareAdBlocking { [weak self, weak webView] success in
+            guard let self, let webView else { decisionHandler(.cancel); return }
+            guard success else {
+                self.model?.send("page_error", ["id": self.id, "generation": self.generation,
+                    "message": "Ad blocking could not start. Turn it off in Settings to load this page."])
+                decisionHandler(.cancel); return
+            }
+            if self.navigation?.responds(to: NSSelectorFromString("webView:decidePolicyForNavigationAction:decisionHandler:")) == true {
+                self.navigation?.webView?(webView, decidePolicyFor: navigationAction, decisionHandler: decisionHandler)
+            } else { decisionHandler(.allow) }
+        }
     }
     func report(_ error: Error) {
         let failure = error as NSError
@@ -408,13 +480,15 @@ struct BrowserSettings: Codable {
 }
 
 @_cdecl("moth_page_attach")
-func moth_page_attach(_ window: UInt64, _ id: UInt64, _ generation: UInt64, _ pointer: UnsafeMutableRawPointer?) {
-    guard let pointer else { return }
+func moth_page_attach(_ window: UInt64, _ id: UInt64, _ generation: UInt64, _ pointer: UnsafeMutableRawPointer?, _ settingsJSON: UnsafePointer<CChar>?) {
+    guard let pointer, let settingsJSON else { return }
+    let settings = try? JSONDecoder().decode(BrowserSettings.self, from: Data(String(cString: settingsJSON).utf8))
     MainActor.assumeIsolated {
         let view = Unmanaged<WKWebView>.fromOpaque(pointer).takeUnretainedValue()
         view.isInspectable = true
         BrowserFeatures.pages["\(window):\(id)"]?.container.removeFromSuperview()
         let delegate = PageDelegate(window: window, id: id, generation: generation, webView: view)
+        delegate.adPreferences = (settings ?? BrowserSettings()).adPreferences
         BrowserFeatures.pages["\(window):\(id)"] = delegate
         view.navigationDelegate = delegate; view.uiDelegate = delegate
     }

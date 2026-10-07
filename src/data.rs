@@ -249,6 +249,8 @@ mod tests {
         assert!(data.workspaces[0].project.local.is_empty());
         assert!(data.settings.site_permissions.is_empty());
         assert!(data.settings.restore_session);
+        assert!(data.settings.ad_blocking);
+        assert!(data.settings.ad_block_exceptions.is_empty());
         assert!(data.downloads.is_empty());
     }
 
@@ -354,6 +356,8 @@ pub struct Settings {
     pub restore_session: bool,
     pub appearance: String,
     pub site_permissions: std::collections::BTreeMap<String, String>,
+    pub ad_blocking: bool,
+    pub ad_block_exceptions: Vec<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -363,6 +367,8 @@ impl Default for Settings {
             restore_session: true,
             appearance: "system".into(),
             site_permissions: Default::default(),
+            ad_blocking: true,
+            ad_block_exceptions: Vec::new(),
         }
     }
 }
@@ -375,4 +381,13 @@ pub struct Download {
     pub complete: bool,
     pub success: bool,
     pub progress: f64,
+}
+
+// Exceptions are exact hostnames, never URL patterns or wildcard filter rules.
+pub fn ad_block_host(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    if value.is_empty() || value.len() > 253 || !value.is_ascii() || value.contains('*') {
+        return None;
+    }
+    url::Host::parse(&value).ok().map(|host| host.to_string())
 }

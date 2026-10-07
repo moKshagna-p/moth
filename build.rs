@@ -14,6 +14,7 @@ fn main() {
         .arg("native/Chrome.swift")
         .arg("native/BrowserFeatures.swift")
         .arg("native/DeveloperTools.swift")
+        .arg("native/AdBlocker.swift")
         .arg("-o")
         .arg(out.join("libmoth_chrome.a"))
         .status()
@@ -28,6 +29,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/Chrome.swift");
     println!("cargo:rerun-if-changed=native/BrowserFeatures.swift");
     println!("cargo:rerun-if-changed=native/DeveloperTools.swift");
+    println!("cargo:rerun-if-changed=native/AdBlocker.swift");
 }
 
 #[cfg(not(target_os = "macos"))]

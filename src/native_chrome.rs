@@ -92,7 +92,13 @@ pub(crate) fn focus_new_tab(id: u64) {
 }
 
 unsafe extern "C" {
-    fn moth_page_attach(window: u64, id: u64, generation: u64, view: *mut c_void);
+    fn moth_page_attach(
+        window: u64,
+        id: u64,
+        generation: u64,
+        view: *mut c_void,
+        settings: *const c_char,
+    );
     fn moth_page_action(window: u64, id: u64, action: *const c_char);
     fn moth_page_layout(window: u64, id: u64, x: f64, y: f64, width: f64, height: f64);
     fn moth_page_visible(window: u64, id: u64, visible: bool);
@@ -108,12 +114,20 @@ pub(crate) fn page_visible(window: u64, id: u64, visible: bool) {
         moth_page_visible(window, id, visible);
     }
 }
-pub(crate) fn attach_page(window: u64, id: u64, generation: u64, view: &wry::WebView) {
+pub(crate) fn attach_page(
+    window: u64,
+    id: u64,
+    generation: u64,
+    view: &wry::WebView,
+    settings: &crate::data::Settings,
+) {
     use wry::WebViewExtMacOS;
     let native = view.webview();
     let pointer = (&*native) as *const _ as *mut c_void;
+    let settings = CString::new(serde_json::to_string(settings).expect("settings JSON"))
+        .expect("settings CString");
     unsafe {
-        moth_page_attach(window, id, generation, pointer);
+        moth_page_attach(window, id, generation, pointer, settings.as_ptr());
     }
 }
 pub(crate) fn action(window: u64, id: u64, action: &str) {
