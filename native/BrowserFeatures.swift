@@ -132,7 +132,7 @@ struct BrowserSettings: Codable {
     static var displayedErrors: [UInt64: String] = [:]
     static func prunePages() {
         pages = pages.filter { _, page in
-            guard page.webView?.superview != nil else { page.container.removeFromSuperview(); return false }
+            guard page.webView?.superview != nil else { page.closePopups(); page.container.removeFromSuperview(); return false }
             return true
         }
     }
@@ -143,7 +143,7 @@ struct BrowserSettings: Codable {
     }
     static func removeWindow(_ id: UInt64) {
         privateStores.removeValue(forKey: id)
-        for page in pages.values where page.window == id { page.container.removeFromSuperview() }
+        for page in pages.values where page.window == id { page.closePopups(); page.container.removeFromSuperview() }
         pages = pages.filter { $0.value.window != id }
         let replacement = ChromeBridge.instances.values.first {
             $0.model.windowID != id && $0.model.snapshot?.private_mode == false
@@ -311,7 +311,7 @@ struct BrowserSettings: Codable {
     }
 }
 
-// Forward callbacks not handled here to Wry, preserving its navigation and popup lifecycle.
+// Forward callbacks not handled here to Wry, preserving its navigation and file dialogs.
 @MainActor final class PageDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     let window: UInt64
     let id: UInt64
@@ -327,9 +327,11 @@ struct BrowserSettings: Codable {
     var mediaSuspended = false
     var adPreferences = AdBlockPreferences()
     var installedAdRules: WKContentRuleList?
-    init(window: UInt64, id: UInt64, generation: UInt64, webView: WKWebView) {
+    var popups: [UUID: BrowserPopup] = [:]
+    weak var popup: BrowserPopup?
+    init(window: UInt64, id: UInt64, generation: UInt64, webView: WKWebView, uiDelegate: WKUIDelegate? = nil) {
         self.window = window; self.id = id; self.generation = generation; self.webView = webView
-        navigation = webView.navigationDelegate; ui = webView.uiDelegate
+        navigation = webView.navigationDelegate; ui = uiDelegate ?? webView.uiDelegate
         container = NSView(frame: webView.frame)
         container.isHidden = webView.isHidden
         if let parent = webView.superview {
@@ -341,7 +343,7 @@ struct BrowserSettings: Codable {
         }
         super.init()
         focusObserver = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            guard let self, let view = self.webView, event.window == view.window,
+            guard let self, self.popup == nil, let view = self.webView, event.window == view.window,
                   !view.isHidden, !self.container.isHidden, view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
             self.model?.send("focus_pane", ["id": self.id]); return event
         }
@@ -380,6 +382,7 @@ struct BrowserSettings: Codable {
         guard adPreferences != preferences else { return }
         let old = adPreferences
         adPreferences = preferences
+        for popup in popups.values { popup.page.updateAdBlocking(preferences) }
         let host = webView?.url?.host
         let reload = old.blocks(host: host) != preferences.blocks(host: host)
         prepareAdBlocking { [weak self] success in
@@ -393,8 +396,9 @@ struct BrowserSettings: Codable {
         prepareAdBlocking { [weak self, weak webView] success in
             guard let self, let webView else { decisionHandler(.cancel); return }
             guard success else {
-                self.model?.send("page_error", ["id": self.id, "generation": self.generation,
-                    "message": "Ad blocking could not start. Turn it off in Settings to load this page."])
+                if let popup = self.popup { popup.showError("Ad blocking could not start. Turn it off in Settings and retry.") }
+                else { self.model?.send("page_error", ["id": self.id, "generation": self.generation,
+                    "message": "Ad blocking could not start. Turn it off in Settings to load this page."]) }
                 decisionHandler(.cancel); return
             }
             if self.navigation?.responds(to: NSSelectorFromString("webView:decidePolicyForNavigationAction:decisionHandler:")) == true {
@@ -402,17 +406,35 @@ struct BrowserSettings: Codable {
             } else { decisionHandler(.allow) }
         }
     }
+    func closePopups() {
+        for popup in Array(popups.values) { popup.close() }
+        popups.removeAll()
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+        let popup = BrowserPopup(opener: self, configuration: configuration, features: windowFeatures,
+                                 initialURL: navigationAction.request.url)
+        popups[popup.id] = popup
+        popup.window.makeKeyAndOrderFront(nil)
+        // WebKit starts the original request after we return this view. Loading just
+        // the URL ourselves would lose POST bodies and the JavaScript opener.
+        return popup.webView
+    }
+    func webViewDidClose(_ webView: WKWebView) { popup?.close() }
     func report(_ error: Error) {
         let failure = error as NSError
         // WebKit interrupts navigation when a response becomes a download.
         // That policy transition is not a page failure.
         guard !(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled),
               !(failure.domain == "WebKitErrorDomain" && failure.code == 102) else { return }
+        if let popup { popup.showError(error.localizedDescription); return }
         model?.send("page_error", ["id": id, "generation": generation, "message": error.localizedDescription + " Use Reload to retry."])
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { report(error) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { report(error) }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if let popup { popup.showError("This page stopped responding. Close this window and retry sign-in."); return }
         model?.send("page_error", ["id": id, "generation": generation, "message": "This page stopped responding. Use Reload to reopen it."])
     }
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
@@ -486,6 +508,7 @@ func moth_page_attach(_ window: UInt64, _ id: UInt64, _ generation: UInt64, _ po
     MainActor.assumeIsolated {
         let view = Unmanaged<WKWebView>.fromOpaque(pointer).takeUnretainedValue()
         view.isInspectable = true
+        BrowserFeatures.pages["\(window):\(id)"]?.closePopups()
         BrowserFeatures.pages["\(window):\(id)"]?.container.removeFromSuperview()
         let delegate = PageDelegate(window: window, id: id, generation: generation, webView: view)
         delegate.adPreferences = (settings ?? BrowserSettings()).adPreferences
