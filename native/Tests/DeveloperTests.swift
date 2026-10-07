@@ -18,6 +18,31 @@ import XCTest
     func fixture() throws -> ChromeSnapshot {
         try JSONDecoder().decode(ChromeSnapshot.self, from: Data(fixtureJSON().utf8))
     }
+    func testWallpaperContrastStaysReadableWithExplicitPageAppearance() throws {
+        _ = NSApplication.shared
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = ChromeModel(); model.photoPath = path.path
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 32, pixelsHigh: 32,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        func fill(_ component: UInt8) {
+            let pixels = bitmap.bitmapData!
+            for y in 0..<32 { for x in 0..<32 {
+                let offset = y * bitmap.bytesPerRow + x * 4
+                pixels[offset] = component; pixels[offset + 1] = component
+                pixels[offset + 2] = component; pixels[offset + 3] = 255
+            } }
+        }
+        fill(0)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: path)
+        model.update(fixtureJSON(appearance: "light", hasPhoto: true, version: 1))
+        XCTAssertEqual(model.chromeScheme, .dark)
+        fill(255)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: path)
+        model.update(fixtureJSON(appearance: "dark", hasPhoto: true, version: 2))
+        XCTAssertEqual(model.chromeScheme, .light)
+    }
     func testFuzzySearchPreservesOrderAndHandlesUnicode() {
         XCTAssertTrue(PaletteSearch.score("insp", in: "Web Inspector")! > PaletteSearch.score("wip", in: "Web Inspector")!)
         XCTAssertEqual(PaletteSearch.score("cafe", in: "Café"), 1000)

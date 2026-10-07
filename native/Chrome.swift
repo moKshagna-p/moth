@@ -148,8 +148,8 @@ struct ChromeSnapshot: Decodable {
             chromeScheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             return
         }
-        if snapshot?.settings.appearance == "dark" { chromeScheme = .dark; return }
-        if snapshot?.settings.appearance == "light" { chromeScheme = .light; return }
+        // Page appearance follows the preference; wallpaper chrome follows its
+        // actual backdrop so a dark photo cannot make light-mode labels disappear.
         guard let sample = photoSample, let wallpaper else {
             chromeScheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             return
@@ -495,6 +495,8 @@ private struct TabRow: View {
         .background(rowBackground)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: selected)
+        .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
         .contextMenu {
             Button(tab.pinned ? "Unpin Tab" : "Pin Tab") { model.send("toggle_pin", ["id": tab.id]) }
             Button(tab.keep_awake ? "Allow Tab to Sleep" : "Keep Tab Awake") { model.send("toggle_keep_awake", ["id": tab.id]) }
@@ -549,11 +551,12 @@ private struct SidebarView: View {
                             if index > 0 && workspaceTabs[index - 1].pinned && !tab.pinned {
                                 Divider().padding(.horizontal, 12).padding(.vertical, 5)
                             }
-                            TabRow(model: model, tab: tab)
+                            TabRow(model: model, tab: tab).transition(.opacity)
                         }
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
+                    .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.18), value: workspaceTabs.map(\.id))
                 }
 
                 workspaceSwitcher
@@ -764,7 +767,6 @@ private struct PhotoControls: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .background(.regularMaterial, in: Capsule())
         .glassEffect(.regular.tint(.white.opacity(0.08)).interactive(), in: Capsule())
         .environment(\.colorScheme, .dark)
     }
@@ -833,6 +835,7 @@ private struct PhotoPositionEditor: View {
     private var photoControls: NSHostingView<PhotoControls>?
     private var escapeMonitor: Any?
     private var developerOverlay: DeveloperHostingView?
+    private var paletteAnimation = 0
 
     deinit { if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) } }
 
@@ -894,7 +897,18 @@ private struct PhotoPositionEditor: View {
             parent.addSubview(palette, positioned: .above, relativeTo: nil)
             palette.frame = parent.bounds
         }
-        palette.isHidden = !visible
+        paletteAnimation += 1
+        let token = paletteAnimation
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.16
+        if visible { palette.alphaValue = 0; palette.isHidden = false }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            palette.animator().alphaValue = visible ? 1 : 0
+        } completionHandler: { [weak self, weak palette] in
+            MainActor.assumeIsolated {
+                if !visible, self?.paletteAnimation == token { palette?.isHidden = true }
+            }
+        }
     }
 
     func raiseDeveloperOverlay() {
