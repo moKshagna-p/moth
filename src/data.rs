@@ -255,6 +255,28 @@ mod tests {
     }
 
     #[test]
+    fn ad_block_settings_persist_and_exceptions_are_exact_hosts() {
+        let mut settings = Settings::default();
+        settings.ad_blocking = false;
+        settings.ad_block_exceptions = vec!["example.com".into()];
+        let saved = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&saved).unwrap();
+        assert!(!loaded.ad_blocking);
+        assert_eq!(loaded.ad_block_exceptions, ["example.com"]);
+        assert_eq!(ad_block_host(" Example.COM. "), Some("example.com".into()));
+        for invalid in [
+            "",
+            "*.example.com",
+            "https://example.com",
+            "user@example.com",
+            "example.com/path",
+            "example.com:443",
+        ] {
+            assert!(ad_block_host(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn developer_presets_and_keep_awake_survive_restart() {
         let mut state = BrowserData::default();
         state.workspaces[0].project.local = "http://localhost:3000/app".into();
