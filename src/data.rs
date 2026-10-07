@@ -256,9 +256,11 @@ mod tests {
 
     #[test]
     fn ad_block_settings_persist_and_exceptions_are_exact_hosts() {
-        let mut settings = Settings::default();
-        settings.ad_blocking = false;
-        settings.ad_block_exceptions = vec!["example.com".into()];
+        let settings = Settings {
+            ad_blocking: false,
+            ad_block_exceptions: vec!["example.com".into()],
+            ..Settings::default()
+        };
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: Settings = serde_json::from_str(&saved).unwrap();
         assert!(!loaded.ad_blocking);

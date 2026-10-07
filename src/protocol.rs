@@ -165,8 +165,9 @@ impl BrowserProxy {
     pub fn send_event(
         &self,
         event: BrowserEvent,
-    ) -> Result<(), tao::event_loop::EventLoopClosed<BrowserEvent>> {
+    ) -> Result<(), Box<tao::event_loop::EventLoopClosed<BrowserEvent>>> {
         self.proxy
             .send_event(BrowserEvent::Routed(self.id, Box::new(event)))
+            .map_err(Box::new)
     }
 }
