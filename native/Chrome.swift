@@ -15,16 +15,28 @@ struct TabInfo: Decodable, Identifiable {
     let loading: Bool
     let sleeping: Bool
     let pinned: Bool
+    let keep_awake: Bool
+    let playing: Bool
+    let media_suspended: Bool
+    let zoom: Double
+    let page_error: String?
+    let viewport: [UInt16]?
     let workspace: UInt64
 }
 
 struct WorkspaceInfo: Decodable, Identifiable {
     let id: UInt64
     let name: String
+    let project: ProjectPreset
 }
 
 struct ChromeSnapshot: Decodable {
     let tabs: [TabInfo]
+    let bookmarks: [SavedEntry]
+    let history: [SavedEntry]
+    let split: UInt64?
+    let split_right: UInt64?
+    let split_ratio: Double
     let workspaces: [WorkspaceInfo]
     let active: UInt64
     let active_workspace: UInt64
@@ -60,7 +72,9 @@ struct ChromeSnapshot: Decodable {
     @Published var addressFocus = 0
     @Published var paletteMode: PaletteMode?
     @Published var paletteFocus = 0
-    @Published var paletteQuery = ""
+    @Published var paletteQuery = "" { didSet { rebuildPalette(reset: true) } }
+    @Published var paletteResults: [PaletteResult] = []
+    @Published var paletteSelection = 0
     @Published var renamingWorkspace = false
     @Published var workspaceName = ""
     @Published var windowSize = CGSize(width: 1000, height: 768) { didSet { updateContrast() } }
@@ -97,13 +111,16 @@ struct ChromeSnapshot: Decodable {
         let themeChanged = snapshot?.site_color != next.site_color || snapshot?.settings.appearance != next.settings.appearance
         sidebarWidth = CGFloat(next.sidebar_width ?? 220)
         snapshot = next
+        if paletteMode != nil { rebuildPalette(reset: false) }
         if next.photo_version != loadedPhotoVersion {
             loadedPhotoVersion = next.photo_version
             wallpaper = next.has_photo ? NSImage(contentsOfFile: photoPath) : nil
             photoSample = wallpaper.flatMap(makePhotoSample)
         }
         if photoChanged || cropChanged || themeChanged { updateContrast() }
-        if !editingAddress { address = activeTab?.url == "about:blank" ? "" : activeTab?.url ?? "" }
+        if !editingAddress {
+            address = activeTab?.url == "about:blank" ? "" : activeTab?.url ?? ""
+        }
     }
 
     var chromeInk: Color { chromeScheme == .dark ? .white : Color(white: 0.08) }
@@ -182,12 +199,28 @@ struct ChromeSnapshot: Decodable {
     func showPalette(_ mode: PaletteMode) {
         paletteQuery = ""
         paletteMode = mode
+        rebuildPalette(reset: true)
         bridge?.setPaletteVisible(true)
         DispatchQueue.main.async { self.paletteFocus += 1 }
     }
     func closePalette() {
         paletteMode = nil
         bridge?.setPaletteVisible(false)
+    }
+    func rebuildPalette(reset: Bool) {
+        guard let snapshot else { return }
+        let selectedID = paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection].id : nil
+        paletteResults = PaletteSearch.results(snapshot: snapshot, query: paletteQuery, newTab: paletteMode == .newTab)
+        paletteSelection = reset ? 0 : (paletteResults.firstIndex { $0.id == selectedID } ?? 0)
+    }
+    func movePalette(_ direction: Int) {
+        guard !paletteResults.isEmpty else { return }
+        paletteSelection = (paletteSelection + direction + paletteResults.count) % paletteResults.count
+    }
+    func submitPalette(_ result: PaletteResult? = nil) {
+        guard let item = result ?? (paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection] : nil) else { return }
+        closePalette()
+        send(item.command, item.values)
     }
     func choosePhoto() {
         let picker = NSOpenPanel()
@@ -389,90 +422,81 @@ private final class ChromeHostingView: NSHostingView<ChromeSurface> {
     }
 }
 
-private struct SidebarView: View {
+private struct TabRow: View {
     @ObservedObject var model: ChromeModel
+    let tab: TabInfo
+    @State private var hovering = false
 
-    private var workspaceTabs: [TabInfo] {
-        guard let snapshot = model.snapshot else { return [] }
-        return snapshot.tabs.filter { $0.workspace == snapshot.active_workspace }
-    }
+    private var selected: Bool { tab.id == model.snapshot?.active }
 
     var body: some View {
-        ZStack {
-            VStack(alignment: .leading, spacing: 0) {
-                ScrollView {
-                    LazyVStack(spacing: 4) {
-                        ForEach(workspaceTabs) { tab in
-                            tabRow(tab)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 10)
-                }
-
-                workspaceSwitcher
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 14)
-                Spacer().frame(height: 16)
-            }
-        }
-        .foregroundStyle(model.chromeInk)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .alert("Rename Workspace", isPresented: $model.renamingWorkspace) {
-            TextField("Name", text: $model.workspaceName)
-            Button("Rename") { model.send("rename_workspace", ["name": model.workspaceName]) }
-            Button("Cancel", role: .cancel) {}
-        }
-    }
-
-    private func tabRow(_ tab: TabInfo) -> some View {
-        let selected = tab.id == model.snapshot?.active
-        let row = HStack(spacing: 10) {
+        HStack(spacing: 0) {
             Button { model.send("switch_tab", ["id": tab.id]) } label: {
-                HStack(spacing: 11) {
+                HStack(spacing: 10) {
                     AsyncImage(url: tab.favicon.flatMap(URL.init(string:))) { phase in
                         if let image = phase.image {
                             image.resizable().scaledToFit()
                         } else {
                             Image(systemName: tab.sleeping ? "moon.zzz" : tab.url == "about:blank" ? "square.dashed" : "globe")
                                 .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(model.chromeInk)
+                                .foregroundStyle(model.chromeMuted)
                         }
                     }
-                    .frame(width: 17, height: 17)
+                    .frame(width: 16, height: 16)
                     .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tab.title.isEmpty ? "New Tab" : tab.title)
-                            .foregroundStyle(model.chromeInk)
-                            .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
-                            .lineLimit(1)
+                    Text(tab.title.isEmpty ? "New Tab" : tab.title)
+                        .foregroundStyle(model.chromeInk)
+                        .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if tab.playing || tab.media_suspended {
+                        Image(systemName: tab.media_suspended ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 10)).frame(width: 18, height: 22)
+                            .accessibilityLabel(tab.media_suspended ? "Media suspended" : "Media playing")
                     }
-                    Spacer(minLength: 0)
-                    if tab.pinned { Image(systemName: "pin.fill").accessibilityLabel("Pinned") }
+                    if tab.keep_awake {
+                        Image(systemName: "bolt.fill").font(.system(size: 8)).help("Kept awake")
+                    }
+                    if tab.pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8))
+                            .foregroundStyle(model.chromeMuted)
+                            .accessibilityLabel("Pinned")
+                    }
+                    Spacer(minLength: 4)
                     if tab.loading { ProgressView().controlSize(.mini) }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 12)
-                .frame(height: 36)
+                .padding(.horizontal, 10)
+                .padding(.trailing, 22)
+                .frame(height: 32)
                 .contentShape(Rectangle())
-                .glassEffect(.regular.tint(selected ? model.chromeInk.opacity(0.12) : .clear).interactive(), in: Capsule())
             }
             .buttonStyle(.plain)
             .help(tab.sleeping ? "Sleeping tab — reloads when opened" : tab.url)
-            Button { model.send("close_tab", ["id": tab.id]) } label: {
-                Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
-                    .frame(width: 22, height: 22)
-                    .glassEffect(.regular.interactive(), in: Circle())
+            .overlay(alignment: .trailing) {
+                Button { model.send("close_tab", ["id": tab.id]) } label: {
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(model.chromeMuted)
+                        .frame(width: 20, height: 20)
+                        .background(hovering || selected ? Color.white.opacity(0.16) : .clear, in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .opacity(selected || hovering ? 1 : 0)
+                .allowsHitTesting(selected || hovering)
+                .help("Close Tab")
+                .accessibilityLabel("Close " + tab.title)
+                .padding(.trailing, 6)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(model.chromeMuted)
-            .opacity(0.85)
-            .help("Close Tab")
-            .accessibilityLabel("Close " + tab.title)
-            .padding(.trailing, 6)
         }
+        .frame(height: 32)
+        .background(rowBackground)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .contextMenu {
             Button(tab.pinned ? "Unpin Tab" : "Pin Tab") { model.send("toggle_pin", ["id": tab.id]) }
+            Button(tab.keep_awake ? "Allow Tab to Sleep" : "Keep Tab Awake") { model.send("toggle_keep_awake", ["id": tab.id]) }
+            Button(tab.media_suspended ? "Resume Media" : "Suspend Media") { model.send("toggle_media", ["id": tab.id]) }
             Button("Duplicate Tab") { model.send("duplicate_tab", ["id": tab.id]) }
             Button("Close Other Tabs") { model.send("close_other_tabs", ["id": tab.id]) }
             Button("Open Beside Current Tab") { model.send("split_tab", ["id": tab.id]) }
@@ -489,11 +513,60 @@ private struct SidebarView: View {
                 }
             }
         }
-        return row.draggable(String(tab.id))
-            .dropDestination(for: String.self) { ids, _ in
-                guard let value = ids.first, let id = UInt64(value), id != tab.id else { return false }
-                model.send("reorder_tab", ["id": id, "before": tab.id]); return true
+        .draggable(String(tab.id))
+        .dropDestination(for: String.self) { ids, _ in
+            guard let value = ids.first, let id = UInt64(value), id != tab.id else { return false }
+            model.send("reorder_tab", ["id": id, "before": tab.id]); return true
+        }
+    }
+
+    // Rows share the panel's glass surface; only selection and hover read as filled.
+    @ViewBuilder private var rowBackground: some View {
+        if selected {
+            Capsule().fill(model.chromeInk.opacity(0.13))
+        } else if hovering {
+            Capsule().fill(model.chromeInk.opacity(0.07))
+        }
+    }
+}
+
+private struct SidebarView: View {
+    @ObservedObject var model: ChromeModel
+
+    private var workspaceTabs: [TabInfo] {
+        guard let snapshot = model.snapshot else { return [] }
+        return snapshot.tabs.filter { $0.workspace == snapshot.active_workspace }.sorted { $0.pinned && !$1.pinned }
+    }
+
+    var body: some View {
+        ZStack {
+            VStack(alignment: .leading, spacing: 0) {
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(workspaceTabs.enumerated()), id: \.element.id) { index, tab in
+                            if index > 0 && workspaceTabs[index - 1].pinned && !tab.pinned {
+                                Divider().padding(.horizontal, 12).padding(.vertical, 5)
+                            }
+                            TabRow(model: model, tab: tab)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                }
+
+                workspaceSwitcher
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 14)
+                Spacer().frame(height: 16)
             }
+        }
+        .foregroundStyle(model.chromeInk)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert("Rename Workspace", isPresented: $model.renamingWorkspace) {
+            TextField("Name", text: $model.workspaceName)
+            Button("Rename") { model.send("rename_workspace", ["name": model.workspaceName]) }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var workspaceSwitcher: some View {
@@ -515,6 +588,8 @@ private struct SidebarView: View {
                     model.customizingWallpaper.toggle()
                     model.bridge?.updatePhotoControls()
                 }
+                Button("Project Preset…") { model.send("project_settings") }
+                Button("Open Project") { model.send("open_project") }
                 Button("New Workspace") { model.send("new_workspace") }
                 Button("Rename Workspace") {
                     model.workspaceName = model.activeWorkspace?.name ?? ""
@@ -549,6 +624,7 @@ private struct ToolbarView: View {
     @FocusState private var addressFocused: Bool
 
     var body: some View {
+        GlassEffectContainer(spacing: 10) {
         HStack(spacing: 10) {
             HStack(spacing: 10) {
                 SymbolButton(symbol: "chevron.left", label: "Back (⌘[)", enabled: model.snapshot?.can_go_back ?? false) { model.send("back") }
@@ -562,7 +638,7 @@ private struct ToolbarView: View {
                     .font(.system(size: 12)).foregroundStyle(model.chromeMuted)
                     .frame(width: 28)
                 TextField("Search or enter an address", text: Binding(
-                    get: { addressFocused ? model.address : (URL(string: model.address)?.host ?? model.address) },
+                    get: { addressFocused ? model.address : developerAddress(model.address) },
                     set: { model.address = $0 }
                 ))
                     .textFieldStyle(.plain)
@@ -588,6 +664,7 @@ private struct ToolbarView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 10) {
+                DeveloperMenu(model: model)
                 SymbolButton(symbol: model.snapshot?.bookmarked == true ? "star.fill" : "star", label: "Bookmark (⌘D)") { model.send("toggle_bookmark") }
                 SymbolButton(symbol: "magnifyingglass", label: "Quick Switch (⌘K)") { model.showSwitcher() }
             }
@@ -597,118 +674,54 @@ private struct ToolbarView: View {
         .foregroundStyle(model.chromeInk)
         .clipped()
         .onChange(of: model.addressFocus) { _, _ in addressFocused = true }
+        }
     }
 }
 
 private struct CommandPalette: View {
     @ObservedObject var model: ChromeModel
     @FocusState private var searchFocused: Bool
-
-    private var matches: [TabInfo] {
-        guard let tabs = model.snapshot?.tabs else { return [] }
-        if model.paletteQuery.isEmpty { return model.paletteMode == .switcher ? tabs : [] }
-        return tabs.filter { ($0.title + " " + $0.url).localizedCaseInsensitiveContains(model.paletteQuery) }
-    }
-
-    private var paletteHeight: CGFloat {
-        let visibleMatches = min(matches.count, 5)
-        let actionHeight: CGFloat = model.paletteMode == .newTab ? 49 : 0
-        return 61 + actionHeight + CGFloat(visibleMatches) * 54 + (visibleMatches > 0 ? 16 : 0)
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(model.paletteMode == .newTab ? "Search or enter a URL" : "Switch to a tab", text: $model.paletteQuery)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 17))
-                    .focused($searchFocused)
-                    .onSubmit { submit() }
-                Text("esc").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
-            }
-            .padding(20)
-            if model.paletteMode == .newTab && model.paletteQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button {
-                    model.send("open_blank_tab")
-                    model.closePalette()
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "plus").frame(width: 20)
-                        Text("Blank tab")
-                        Spacer()
-                        Text("↵").foregroundStyle(.secondary)
-                    }
-                    .font(.system(size: 13))
-                    .padding(.horizontal, 18).frame(height: 49)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            if model.paletteMode == .newTab && !model.paletteQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button { openQuery() } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "arrow.up.left").frame(width: 20)
-                        Text(model.paletteQuery).lineLimit(1)
-                        Spacer()
-                        Text("Open in new tab").foregroundStyle(.secondary)
-                    }
-                    .font(.system(size: 13))
-                    .padding(.horizontal, 18).frame(height: 49)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            if !matches.isEmpty {
-                Divider().padding(.horizontal, 16)
+                TextField(model.paletteMode == .newTab ? "Search, enter a URL, or run an action" : "Tabs, history, bookmarks, and actions", text: $model.paletteQuery)
+                    .textFieldStyle(.plain).font(.system(size: 17)).focused($searchFocused)
+                    .onSubmit { model.submitPalette() }
+                    .onKeyPress(.upArrow) { model.movePalette(-1); return .handled }
+                    .onKeyPress(.downArrow) { model.movePalette(1); return .handled }
+                Text("esc").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            }.padding(20)
+            Divider().padding(.horizontal, 16)
+            ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(matches) { tab in
-                            Button { select(tab) } label: {
-                                HStack(spacing: 13) {
-                                    Image(systemName: "globe").frame(width: 20)
+                        ForEach(Array(model.paletteResults.enumerated()), id: \.element.id) { index, result in
+                            Button { model.submitPalette(result) } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: result.symbol).frame(width: 20)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(tab.title).lineLimit(1).font(.system(size: 13, weight: .medium))
-                                        Text(tab.url).lineLimit(1).font(.system(size: 11)).foregroundStyle(.secondary)
+                                        Text(result.title).lineLimit(1).font(.system(size: 13, weight: .medium))
+                                        Text(result.subtitle).lineLimit(1).font(.system(size: 11)).foregroundStyle(.secondary)
                                     }
-                                    Spacer()
-                                    Text(model.snapshot?.workspaces.first { $0.id == tab.workspace }?.name ?? "")
-                                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                                }
-                                .padding(.horizontal, 14).frame(height: 52).contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
+                                    Spacer(minLength: 8)
+                                    Text(index == model.paletteSelection ? "↵" : result.shortcut)
+                                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                                }.padding(.horizontal, 14).frame(height: 52).contentShape(Rectangle())
+                                    .background(index == model.paletteSelection ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                            }.buttonStyle(.plain).id(result.id)
+                            .accessibilityAddTraits(index == model.paletteSelection ? .isSelected : [])
                         }
+                    }.padding(.horizontal, 10).padding(.vertical, 8)
+                }.frame(height: CGFloat(min(6, model.paletteResults.count)) * 54 + 16)
+                    .onChange(of: model.paletteSelection) { _, index in
+                        if model.paletteResults.indices.contains(index) { proxy.scrollTo(model.paletteResults[index].id) }
                     }
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                }
             }
         }
-        .frame(height: paletteHeight)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
         .onChange(of: model.paletteFocus) { _, _ in searchFocused = true }
         .onExitCommand { model.closePalette() }
-    }
-
-    private func select(_ tab: TabInfo) {
-        model.send("switch_tab", ["id": tab.id])
-        model.closePalette()
-    }
-
-    private func submit() {
-        if model.paletteMode == .newTab { openQuery() }
-        else if let first = matches.first { select(first) }
-    }
-
-    private func openQuery() {
-        let value = model.paletteQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.isEmpty {
-            model.send("open_blank_tab")
-            model.closePalette()
-            return
-        }
-        model.send("open_new_tab", ["value": value])
-        model.closePalette()
     }
 }
 
@@ -817,6 +830,7 @@ private struct PhotoPositionEditor: View {
     private var palette: NSHostingView<PaletteOverlay>?
     private var photoControls: NSHostingView<PhotoControls>?
     private var escapeMonitor: Any?
+    private var developerOverlay: DeveloperHostingView?
 
     deinit { if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) } }
 
@@ -835,6 +849,10 @@ private struct PhotoPositionEditor: View {
         parent.addSubview(chrome)
         parent.addSubview(palette)
         parent.addSubview(photoControls)
+        let developerOverlay = DeveloperHostingView(rootView: DeveloperOverlay(model: model))
+        developerOverlay.model = model
+        parent.addSubview(developerOverlay)
+        self.developerOverlay = developerOverlay
         palette.isHidden = true
         photoControls.isHidden = true
         self.chrome = chrome
@@ -860,6 +878,8 @@ private struct PhotoPositionEditor: View {
         model.windowSize = CGSize(width: width, height: height)
         chrome?.frame = parent.bounds
         chrome?.appearance = NSAppearance(named: model.chromeScheme == .dark ? .darkAqua : .aqua)
+        developerOverlay?.frame = parent.bounds
+        BrowserFeatures.layoutFind(model.windowID)
         palette?.frame = parent.bounds
         photoControls?.frame = CGRect(x: max(model.sidebarWidth, width - 130), y: parent.isFlipped ? height - 62 : 22, width: 108, height: 40)
     }
@@ -874,6 +894,12 @@ private struct PhotoPositionEditor: View {
         palette.isHidden = !visible
     }
 
+    func raiseDeveloperOverlay() {
+        guard let parent, let developerOverlay else { return }
+        parent.addSubview(developerOverlay, positioned: .above, relativeTo: nil)
+        BrowserFeatures.layoutFind(model.windowID)
+        if model.paletteMode != nil, let palette { parent.addSubview(palette, positioned: .above, relativeTo: nil) }
+    }
     func updatePhotoControls() {
         guard let parent, let photoControls else { return }
         let show = model.snapshot?.private_mode != true && model.customizingWallpaper && model.activeTab?.url == "about:blank" && model.snapshot?.panel == nil
@@ -913,6 +939,7 @@ func moth_update_chrome(_ id: UInt64, _ json: UnsafePointer<CChar>?) {
         bridge.model.update(text)
         bridge.updateAppearance()
         bridge.updatePhotoControls()
+        bridge.raiseDeveloperOverlay()
         BrowserFeatures.update(id, model: bridge.model)
     }
 }

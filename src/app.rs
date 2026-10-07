@@ -309,6 +309,18 @@ fn setup_menu(proxy: EventLoopProxy<BrowserEvent>) -> Menu {
     );
     let print = shortcut("print", "Print / Save as PDF…", Code::KeyP, command);
     let settings = shortcut("settings", "Settings…", Code::Comma, command);
+    let inspect = shortcut(
+        "inspect",
+        "Web Inspector",
+        Code::KeyI,
+        command | Modifiers::ALT,
+    );
+    let screenshot = shortcut(
+        "screenshot",
+        "Save Viewport Screenshot…",
+        Code::KeyS,
+        command | Modifiers::SHIFT,
+    );
     let find = shortcut("find", "Find in Page…", Code::KeyF, command);
     let zoom_in = shortcut("zoom_in", "Zoom In", Code::Equal, command);
     let zoom_out = shortcut("zoom_out", "Zoom Out", Code::Minus, command);
@@ -331,6 +343,8 @@ fn setup_menu(proxy: EventLoopProxy<BrowserEvent>) -> Menu {
         "View",
         true,
         &[
+            &inspect,
+            &screenshot,
             &find,
             &zoom_in,
             &zoom_out,

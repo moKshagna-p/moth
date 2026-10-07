@@ -68,22 +68,30 @@ struct BrowserSettings: Codable {
 
 @MainActor struct FindView: View {
     weak var webView: WKWebView?
+    var dismiss: () -> Void
     @State private var query = ""
     @State private var status = ""
     @FocusState private var focused: Bool
     var body: some View {
         HStack {
-            TextField("Find in page", text: $query).focused($focused).onSubmit { find(false) }
+            TextField("Find in page", text: $query).textFieldStyle(.plain).focused($focused).onSubmit { find(false) }
+                .onChange(of: query) { _, _ in find(false) }
             Text(status).font(.caption).accessibilityLabel(status)
-            Button("Previous") { find(true) }.keyboardShortcut("g", modifiers: [.command, .shift])
-            Button("Next") { find(false) }.keyboardShortcut("g", modifiers: .command)
-        }.buttonStyle(.glass).padding().frame(width: 500).onAppear { focused = true }
+            Button { find(true) } label: { Image(systemName: "chevron.up") }.help("Previous Match").keyboardShortcut("g", modifiers: [.command, .shift])
+            Button { find(false) } label: { Image(systemName: "chevron.down") }.help("Next Match").keyboardShortcut("g", modifiers: .command)
+            Button(action: dismiss) { Image(systemName: "xmark") }.help("Close Find")
+        }.buttonStyle(.plain).padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 14))
+            .onAppear { focused = true }.onExitCommand(perform: dismiss)
     }
     private func find(_ backwards: Bool) {
         guard !query.isEmpty else { status = ""; return }
+        let requested = query
         let configuration = WKFindConfiguration(); configuration.backwards = backwards
         configuration.wraps = true; configuration.caseSensitive = false
         webView?.find(query, configuration: configuration) { result in
+            guard query == requested else { return }
             status = result.matchFound ? "Match found" : "No matches"
         }
     }
@@ -94,8 +102,17 @@ struct BrowserSettings: Codable {
     static var pages: [String: PageDelegate] = [:]
     static var downloads: [String: DownloadDelegate] = [:]
     static var settingsWindows: [UInt64: NSWindow] = [:]
-    static var findWindows: [UInt64: NSPanel] = [:]
+    static var projectWindows: [UInt64: NSWindow] = [:]
+    static var findViews: [UInt64: NSHostingView<FindView>] = [:]
+    static var findTabs: [UInt64: UInt64] = [:]
+    static var mediaTimer: Timer?
     static var displayedErrors: [UInt64: String] = [:]
+    static func prunePages() {
+        pages = pages.filter { _, page in
+            guard page.webView?.superview != nil else { page.container.removeFromSuperview(); return false }
+            return true
+        }
+    }
     static func origin(_ url: URL) -> String? {
         guard let scheme = url.scheme, ["http", "https"].contains(scheme), let host = url.host else { return nil }
         let port = url.port.flatMap { ($0 == 80 && scheme == "http") || ($0 == 443 && scheme == "https") ? nil : $0 }
@@ -103,6 +120,7 @@ struct BrowserSettings: Codable {
     }
     static func removeWindow(_ id: UInt64) {
         privateStores.removeValue(forKey: id)
+        for page in pages.values where page.window == id { page.container.removeFromSuperview() }
         pages = pages.filter { $0.value.window != id }
         let replacement = ChromeBridge.instances.values.first {
             $0.model.windowID != id && $0.model.snapshot?.private_mode == false
@@ -116,17 +134,108 @@ struct BrowserSettings: Codable {
             }
         }
         settingsWindows.removeValue(forKey: id)?.close()
-        findWindows.removeValue(forKey: id)?.close()
+        projectWindows.removeValue(forKey: id)?.close()
+        closeFind(id)
         displayedErrors.removeValue(forKey: id)
     }
     static func update(_ id: UInt64, model: ChromeModel) {
-        pages = pages.filter { $0.value.webView != nil }
+        prunePages()
+        if let tab = findTabs[id], tab != model.snapshot?.active || model.snapshot?.panel != nil { closeFind(id) }
+        for tab in model.snapshot?.tabs ?? [] {
+            if let page = pages["\(id):\(tab.id)"], page.mediaSuspended != tab.media_suspended {
+                page.mediaSuspended = tab.media_suspended
+                page.webView?.setAllMediaPlaybackSuspended(tab.media_suspended, completionHandler: nil)
+            }
+        }
+        if mediaTimer == nil {
+            mediaTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+                MainActor.assumeIsolated {
+                    prunePages()
+                    for page in pages.values {
+                        guard let webView = page.webView else { continue }
+                        webView.requestMediaPlaybackState { [weak page] state in
+                            guard let page else { return }
+                            let playing = state == .playing
+                            if page.playing != playing {
+                                page.playing = playing
+                                page.model?.send("media_state", ["id": page.id, "generation": page.generation, "playing": playing])
+                            }
+                        }
+                    }
+                    if pages.isEmpty { mediaTimer?.invalidate(); mediaTimer = nil }
+                }
+            }
+            mediaTimer?.tolerance = 0.5
+        }
         if let error = model.snapshot?.error, displayedErrors[id] != error {
             displayedErrors[id] = error
             let alert = NSAlert(); alert.messageText = "Moth needs your attention"; alert.informativeText = error
             alert.addButton(withTitle: "OK")
             if let window = model.bridge?.parent?.window { alert.beginSheetModal(for: window) { _ in model.send("dismiss_error") } }
         } else if model.snapshot?.error == nil { displayedErrors.removeValue(forKey: id) }
+    }
+    static func closeFind(_ id: UInt64) {
+        findViews.removeValue(forKey: id)?.removeFromSuperview(); findTabs.removeValue(forKey: id)
+    }
+    static func layoutFind(_ id: UInt64) {
+        guard let bridge = ChromeBridge.instances[id], let parent = bridge.parent, let host = findViews[id] else { return }
+        let model = bridge.model
+        let layout = DeveloperLayout(size: parent.bounds.size, sidebar: model.sidebarWidth,
+            split: model.snapshot?.split != nil, activeRight: model.snapshot?.split_right == model.snapshot?.active, ratio: model.snapshot?.split_ratio ?? 0.5)
+        let width = min(420, max(1, layout.active.width - 24))
+        host.frame = CGRect(x: layout.active.maxX - width - 12, y: parent.isFlipped ? 62 : parent.bounds.height - 114, width: width, height: 52)
+        parent.addSubview(host, positioned: .above, relativeTo: nil)
+    }
+    // WebKit records are grouped by domain, across its subdomains and ports.
+    static func recordMatches(host: String, domain: String) -> Bool {
+        let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let domain = domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard !domain.isEmpty else { return false }
+        return host == domain || host.hasSuffix("." + domain)
+    }
+    static func clearCurrentSite(_ page: PageDelegate?, model: ChromeModel) {
+        guard let view = page?.webView, let url = view.url, let host = url.host,
+              ["http", "https"].contains(url.scheme ?? ""), let window = view.window else { return }
+        let store = view.configuration.websiteDataStore
+        store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
+            guard page?.webView === view, view.url == url else { return }
+            let matches = records.filter { recordMatches(host: host, domain: $0.displayName) }
+            let alert = NSAlert()
+            if matches.isEmpty {
+                alert.messageText = "No saved website data for \(host)"; alert.addButton(withTitle: "OK")
+                alert.beginSheetModal(for: window); return
+            }
+            alert.messageText = "Clear data for this website?"
+            alert.informativeText = "WebKit groups data for these domains: " + matches.map(\.displayName).joined(separator: ", ") + ". This removes cookies, caches, and storage for their subdomains and ports, and may sign you out in other Moth windows."
+            alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Clear Website Data")
+            alert.beginSheetModal(for: window) { response in
+                guard response == .alertSecondButtonReturn, page?.webView === view, view.url == url else { return }
+                store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: matches) {
+                    if view.url == url { view.reload() }
+                }
+            }
+        }
+    }
+    static func saveScreenshot(_ page: PageDelegate?, model: ChromeModel) {
+        guard let view = page?.webView, let window = view.window else { return }
+        let url = view.url
+        view.takeSnapshot(with: nil) { image, error in
+            guard page?.webView === view, view.url == url else { return }
+            guard let image, let tiff = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else {
+                let alert = NSAlert(); alert.messageText = "Couldn’t capture this viewport"
+                alert.informativeText = error?.localizedDescription ?? "WebKit did not return an image."
+                alert.beginSheetModal(for: window); return
+            }
+            let panel = NSSavePanel(); panel.allowedContentTypes = [.png]
+            panel.nameFieldStringValue = "Moth-\(url?.host ?? "viewport").png"
+            panel.beginSheetModal(for: window) { response in
+                if response == .OK, let destination = panel.url {
+                    do { try png.write(to: destination, options: .atomic) }
+                    catch { let alert = NSAlert(); alert.messageText = "Couldn’t save screenshot"; alert.informativeText = error.localizedDescription; alert.beginSheetModal(for: window) }
+                }
+            }
+        }
     }
     static func action(_ window: UInt64, _ id: UInt64, _ action: String) {
         guard let bridge = ChromeBridge.instances[window] else { return }
@@ -141,13 +250,25 @@ struct BrowserSettings: Codable {
             panel.contentView = NSHostingView(rootView: SettingsView(model: model, settings: settings))
             panel.center(); panel.makeKeyAndOrderFront(nil); settingsWindows[window] = panel
         case "settings_saved": settingsWindows.removeValue(forKey: window)?.close()
+        case "project":
+            if let existing = projectWindows[window], existing.isVisible { existing.makeKeyAndOrderFront(nil); return }
+            guard let workspace = model.activeWorkspace else { return }
+            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            panel.title = "Project Preset"; panel.isReleasedWhenClosed = false
+            panel.isOpaque = false; panel.backgroundColor = .clear
+            panel.contentView = NSHostingView(rootView: ProjectPresetView(model: model, workspace: workspace.id, name: workspace.name, preset: workspace.project))
+            panel.center(); panel.makeKeyAndOrderFront(nil); projectWindows[window] = panel
+        case "project_saved": projectWindows.removeValue(forKey: window)?.close()
         case "find":
-            guard let webView = page?.webView else { return }
-            findWindows.removeValue(forKey: window)?.close()
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 500, height: 65), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
-            panel.title = "Find in Page"; panel.isReleasedWhenClosed = false
-            panel.contentView = NSHostingView(rootView: FindView(webView: webView))
-            panel.center(); panel.makeKeyAndOrderFront(nil); findWindows[window] = panel
+            guard let webView = page?.webView, let parent = bridge.parent else { return }
+            closeFind(window)
+            let host = NSHostingView(rootView: FindView(webView: webView, dismiss: { closeFind(window) }))
+            findViews[window] = host; findTabs[window] = id
+            parent.addSubview(host); layoutFind(window)
+        case "screenshot": saveScreenshot(page, model: model)
+        case "clear_current_site": clearCurrentSite(page, model: model)
+        case "suspend_media": page?.webView?.setAllMediaPlaybackSuspended(true, completionHandler: nil)
+        case "resume_media": page?.webView?.setAllMediaPlaybackSuspended(false, completionHandler: nil)
         case "default_browser":
             NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpenURLsWithScheme: "http") { error in
                 if let error { Task { @MainActor in model.send("page_error", ["id": id, "generation": page?.generation ?? 0, "message": error.localizedDescription]) } }
@@ -172,16 +293,30 @@ struct BrowserSettings: Codable {
     let id: UInt64
     let generation: UInt64
     weak var webView: WKWebView?
+    // WebKit docks its inspector against the inspected view's superview.
+    // A pane-sized parent keeps those layout changes inside the pane.
+    let container: NSView
     let navigation: WKNavigationDelegate?
     let ui: WKUIDelegate?
     var focusObserver: Any?
+    var playing = false
+    var mediaSuspended = false
     init(window: UInt64, id: UInt64, generation: UInt64, webView: WKWebView) {
         self.window = window; self.id = id; self.generation = generation; self.webView = webView
         navigation = webView.navigationDelegate; ui = webView.uiDelegate
+        container = NSView(frame: webView.frame)
+        container.isHidden = webView.isHidden
+        if let parent = webView.superview {
+            parent.addSubview(container, positioned: .above, relativeTo: webView)
+            webView.removeFromSuperview()
+            container.addSubview(webView)
+            webView.frame = container.bounds
+            webView.autoresizingMask = [.width, .height]
+        }
         super.init()
         focusObserver = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
             guard let self, let view = self.webView, event.window == view.window,
-                  !view.isHidden, view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
+                  !view.isHidden, !self.container.isHidden, view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
             self.model?.send("focus_pane", ["id": self.id]); return event
         }
     }
@@ -277,10 +412,24 @@ func moth_page_attach(_ window: UInt64, _ id: UInt64, _ generation: UInt64, _ po
     guard let pointer else { return }
     MainActor.assumeIsolated {
         let view = Unmanaged<WKWebView>.fromOpaque(pointer).takeUnretainedValue()
+        view.isInspectable = true
+        BrowserFeatures.pages["\(window):\(id)"]?.container.removeFromSuperview()
         let delegate = PageDelegate(window: window, id: id, generation: generation, webView: view)
         BrowserFeatures.pages["\(window):\(id)"] = delegate
         view.navigationDelegate = delegate; view.uiDelegate = delegate
     }
+}
+
+@_cdecl("moth_page_layout")
+func moth_page_layout(_ window: UInt64, _ id: UInt64, _ x: Double, _ y: Double, _ width: Double, _ height: Double) {
+    MainActor.assumeIsolated {
+        guard let pane = BrowserFeatures.pages["\(window):\(id)"]?.container, let parent = pane.superview else { return }
+        pane.frame = CGRect(x: x, y: parent.isFlipped ? y : parent.bounds.height - y - height, width: width, height: height)
+    }
+}
+@_cdecl("moth_page_visible")
+func moth_page_visible(_ window: UInt64, _ id: UInt64, _ visible: Bool) {
+    MainActor.assumeIsolated { BrowserFeatures.pages["\(window):\(id)"]?.container.isHidden = !visible }
 }
 @_cdecl("moth_page_action")
 func moth_page_action(_ window: UInt64, _ id: UInt64, _ action: UnsafePointer<CChar>?) {

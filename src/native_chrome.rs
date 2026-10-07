@@ -94,7 +94,19 @@ pub(crate) fn focus_new_tab(id: u64) {
 unsafe extern "C" {
     fn moth_page_attach(window: u64, id: u64, generation: u64, view: *mut c_void);
     fn moth_page_action(window: u64, id: u64, action: *const c_char);
+    fn moth_page_layout(window: u64, id: u64, x: f64, y: f64, width: f64, height: f64);
+    fn moth_page_visible(window: u64, id: u64, visible: bool);
     fn moth_remove_chrome(id: u64);
+}
+pub(crate) fn page_layout(window: u64, id: u64, bounds: (f64, f64, f64, f64)) {
+    unsafe {
+        moth_page_layout(window, id, bounds.0, bounds.1, bounds.2, bounds.3);
+    }
+}
+pub(crate) fn page_visible(window: u64, id: u64, visible: bool) {
+    unsafe {
+        moth_page_visible(window, id, visible);
+    }
 }
 pub(crate) fn attach_page(window: u64, id: u64, generation: u64, view: &wry::WebView) {
     use wry::WebViewExtMacOS;

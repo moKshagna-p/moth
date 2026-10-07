@@ -49,6 +49,14 @@ fn eviction_score(idle: Duration, activations: u32) -> u128 {
     idle.as_millis() / u128::from(activations.clamp(1, 4))
 }
 
+// Restored tabs have no page title yet, so fall back to the host, not the raw URL.
+fn host_label(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.to_string())
+}
+
 struct Tab {
     id: u64,
     workspace: u64,
@@ -64,6 +72,12 @@ struct Tab {
     site_color: Option<[u8; 3]>,
     pinned: bool,
     zoom: f64,
+    keep_awake: bool,
+    playing: bool,
+    media_suspended: bool,
+    page_error: Option<String>,
+    viewport: Option<(u16, u16)>,
+    bounds: Option<(f64, f64, f64, f64)>,
 }
 
 fn reorder_tabs(tabs: &mut Vec<Tab>, id: u64, before: u64) {
@@ -110,11 +124,20 @@ struct TabState<'a> {
     loading: bool,
     sleeping: bool,
     pinned: bool,
+    keep_awake: bool,
+    playing: bool,
+    media_suspended: bool,
+    zoom: f64,
+    page_error: Option<&'a str>,
+    viewport: Option<(u16, u16)>,
 }
 
 #[derive(Serialize)]
 struct ShellState<'a> {
     private_mode: bool,
+    split: Option<u64>,
+    split_right: Option<u64>,
+    split_ratio: f64,
     error: Option<&'a str>,
     settings: &'a crate::data::Settings,
     tabs: Vec<TabState<'a>>,
@@ -142,6 +165,7 @@ pub(crate) struct Browser {
     pub(crate) key: u64,
     split: Option<u64>,
     split_right: Option<u64>,
+    split_ratio: f64,
     pub(crate) error: Option<String>,
     shell: WebView,
     tabs: Vec<Tab>,
@@ -231,6 +255,7 @@ impl Browser {
             key: proxy.id,
             split: None,
             split_right: None,
+            split_ratio: 0.5,
             error: None,
             downloads: if private_mode {
                 Vec::new()
@@ -332,11 +357,6 @@ impl Browser {
             let _ = self.shell.set_bounds(bounds);
             #[cfg(target_os = "macos")]
             crate::native_chrome::resize(self.key, size.width, size.height);
-            for tab in &self.tabs {
-                if let Some(view) = &tab.view {
-                    let _ = view.set_bounds(bounds);
-                }
-            }
             self.last_size = Some((size.width, size.height));
         }
         if self.shell_visible != Some(show_shell_page) {
@@ -348,28 +368,30 @@ impl Browser {
                 && !show_shell_page
                 && tab.view.is_some();
             if visible {
-                if let Some(view) = &tab.view {
-                    let half = if self.split.is_some() {
-                        content_width / 2.0
-                    } else {
-                        content_width
-                    };
-                    let offset = if self.split.is_some() && Some(tab.id) == self.split_right {
-                        half
-                    } else {
-                        0.0
-                    };
-                    let _ = view.set_bounds(rect(
-                        self.data.sidebar_width as f64 + offset,
-                        TOOLBAR_HEIGHT,
-                        half,
+                if let Some(_view) = &tab.view {
+                    let bounds = page_bounds(
+                        self.data.sidebar_width as f64,
+                        content_width,
                         content_height,
-                    ));
+                        self.split.is_some(),
+                        Some(tab.id) == self.split_right,
+                        self.split_ratio,
+                        tab.viewport,
+                    );
+                    {
+                        #[cfg(target_os = "macos")]
+                        crate::native_chrome::page_layout(self.key, tab.id, bounds);
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = _view.set_bounds(rect(bounds.0, bounds.1, bounds.2, bounds.3));
+                        tab.bounds = Some(bounds);
+                    }
                 }
             }
             if tab.visible != visible {
                 if let Some(view) = &tab.view {
                     let _ = view.set_visible(visible);
+                    #[cfg(target_os = "macos")]
+                    crate::native_chrome::page_visible(self.key, tab.id, visible);
                 }
                 tab.visible = visible;
             }
@@ -404,6 +426,12 @@ impl Browser {
             site_color: None,
             pinned: false,
             zoom: 1.0,
+            keep_awake: false,
+            playing: false,
+            media_suspended: false,
+            page_error: None,
+            viewport: None,
+            bounds: None,
         });
         record_tab_switch(&mut self.tabs, self.active, id, Instant::now());
         self.active = id;
@@ -425,7 +453,7 @@ impl Browser {
                 .iter()
                 .find(|entry| entry.url == session.url)
                 .map(|entry| entry.title.clone())
-                .unwrap_or_else(|| session.url.clone())
+                .unwrap_or_else(|| host_label(&session.url))
         };
         self.tabs.push(Tab {
             id,
@@ -442,6 +470,12 @@ impl Browser {
             site_color: None,
             pinned: session.pinned,
             zoom: 1.0,
+            keep_awake: session.keep_awake,
+            playing: false,
+            media_suspended: false,
+            page_error: None,
+            viewport: None,
+            bounds: None,
         });
     }
 
@@ -498,6 +532,7 @@ impl Browser {
             // serves its simplified results page without the full image UI.
             .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15")
             .with_url(url)
+            .with_devtools(true)
             .with_visible(false)
             .with_bounds(rect(
                 self.data.sidebar_width as f64,
@@ -568,6 +603,7 @@ impl Browser {
             let generation = self.tabs[index].generation + 1;
             let view = self.build_view(id, generation, &self.tabs[index].url)?;
             let _ = view.zoom(self.tabs[index].zoom);
+            self.tabs[index].bounds = None;
             self.tabs[index].view = Some(view);
             self.tabs[index].generation = generation;
             self.tabs[index].loading = true;
@@ -581,6 +617,61 @@ impl Browser {
         self.reap_tabs();
         self.refresh();
         Ok(())
+    }
+
+    fn open_project(&mut self) {
+        let Some(project) = self
+            .data
+            .workspaces
+            .iter()
+            .find(|s| s.id == self.active_workspace)
+            .map(|s| s.project.clone())
+        else {
+            return;
+        };
+        if !project.valid() {
+            return;
+        }
+        let mut opened = Vec::new();
+        for value in [
+            &project.local,
+            &project.repository,
+            &project.docs,
+            &project.staging,
+            &project.production,
+        ] {
+            if value.is_empty() {
+                continue;
+            }
+            let existing = self
+                .tabs
+                .iter()
+                .find(|t| t.workspace == self.active_workspace && &t.url == value)
+                .map(|t| t.id);
+            let id = if let Some(id) = existing {
+                id
+            } else {
+                // Project resources load on demand; only visible panes create WebViews.
+                self.restore_tab(SessionTab {
+                    url: value.clone(),
+                    workspace: self.active_workspace,
+                    pinned: false,
+                    keep_awake: false,
+                });
+                self.tabs.last().unwrap().id
+            };
+            if !opened.contains(&id) {
+                opened.push(id);
+            }
+        }
+        if let Some(&first) = opened.first() {
+            self.switch_tab(first);
+            if project.split {
+                if let Some(&second) = opened.get(1) {
+                    self.handle_command(Command::SplitTab { id: second });
+                }
+            }
+        }
     }
 
     fn switch_tab(&mut self, id: u64) {
@@ -614,6 +705,8 @@ impl Browser {
             let generation = self.tabs[index].generation + 1;
             match self.build_view(self.active, generation, &url) {
                 Ok(view) => {
+                    let _ = view.zoom(self.tabs[index].zoom);
+                    self.tabs[index].bounds = None;
                     self.tabs[index].view = Some(view);
                     self.tabs[index].generation = generation;
                     self.tabs[index].loading = true;
@@ -624,6 +717,7 @@ impl Browser {
                 }
             }
         }
+        self.tabs[index].page_error = None;
         self.tabs[index].favicon = crate::favicon::fallback(&url);
         self.tabs[index].url = url;
         self.tabs[index].last_used = Instant::now();
@@ -639,12 +733,16 @@ impl Browser {
             if tab.id != self.active
                 && Some(tab.id) != self.split
                 && !tab.pinned
+                && !tab.keep_awake
+                && !tab.playing
                 && !self.private_mode
                 && tab.view.is_some()
                 && eviction_score(now.duration_since(tab.last_used), tab.activations)
                     >= IDLE_TAB_AGE.as_millis()
             {
                 tab.view = None;
+                tab.bounds = None;
+                tab.playing = false;
                 tab.visible = false;
                 tab.loading = false;
                 tab.generation += 1;
@@ -662,6 +760,8 @@ impl Browser {
                     tab.id != self.active
                         && Some(tab.id) != self.split
                         && !tab.pinned
+                        && !tab.keep_awake
+                        && !tab.playing
                         && tab.view.is_some()
                 })
                 .max_by_key(|(_, tab)| {
@@ -673,6 +773,8 @@ impl Browser {
                 .map(|(index, _)| index);
             let Some(index) = candidate else { break };
             self.tabs[index].view = None;
+            self.tabs[index].bounds = None;
+            self.tabs[index].playing = false;
             self.tabs[index].visible = false;
             self.tabs[index].loading = false;
             self.tabs[index].generation += 1;
@@ -724,6 +826,116 @@ impl Browser {
     pub(crate) fn handle_command(&mut self, command: Command) {
         match command {
             Command::NewWindow { .. } => {} // Handled by the application window manager.
+            Command::Inspect => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) {
+                    if let Some(view) = &tab.view {
+                        tab.keep_awake = true;
+                        view.open_devtools();
+                    }
+                }
+            }
+            Command::Screenshot => self.native_action("screenshot"),
+            Command::ProjectSettings => self.native_action("project"),
+            Command::ClearCurrentSiteData => self.native_action("clear_current_site"),
+            Command::SetProject { workspace, project } => {
+                if !project.valid() {
+                    self.error =
+                        Some("Use HTTP or HTTPS URLs without embedded credentials.".into());
+                } else if let Some(space) =
+                    self.data.workspaces.iter_mut().find(|s| s.id == workspace)
+                {
+                    space.project = project;
+                    self.native_action("project_saved");
+                }
+            }
+            Command::OpenProject => self.open_project(),
+            Command::SwitchEnvironment { environment } => {
+                if let Some(project) = self
+                    .data
+                    .workspaces
+                    .iter()
+                    .find(|s| s.id == self.active_workspace)
+                    .map(|s| &s.project)
+                {
+                    let target = match environment.as_str() {
+                        "local" => &project.local,
+                        "staging" => &project.staging,
+                        "production" => &project.production,
+                        _ => return,
+                    };
+                    if !target.is_empty() {
+                        self.navigate_active(target.clone());
+                    }
+                }
+            }
+            Command::SetSplitRatio { ratio } => {
+                if ratio.is_finite() {
+                    self.split_ratio = ratio.clamp(0.2, 0.8);
+                    self.resize();
+                }
+                self.refresh();
+                return; // Dragging is transient; don't schedule disk writes.
+            }
+            Command::SwapPanes => {
+                if let Some(split) = self.split {
+                    self.split_right = Some(if self.split_right == Some(self.active) {
+                        split
+                    } else {
+                        self.active
+                    });
+                    self.resize();
+                }
+            }
+            Command::SetViewport { width, height } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) {
+                    tab.viewport = if width == 0 || height == 0 {
+                        None
+                    } else {
+                        Some((width.clamp(240, 3840), height.clamp(240, 2160)))
+                    };
+                }
+                self.resize();
+            }
+            Command::ToggleKeepAwake { id } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    tab.keep_awake = !tab.keep_awake;
+                }
+            }
+            Command::ToggleMedia { id } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    tab.media_suspended = !tab.media_suspended;
+                    #[cfg(target_os = "macos")]
+                    crate::native_chrome::action(
+                        self.key,
+                        id,
+                        if tab.media_suspended {
+                            "suspend_media"
+                        } else {
+                            "resume_media"
+                        },
+                    );
+                }
+            }
+            Command::MediaState {
+                id,
+                generation,
+                playing,
+            } => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == id && t.generation == generation && t.view.is_some())
+                {
+                    tab.playing = playing;
+                }
+                self.refresh();
+                return;
+            }
+            Command::DismissPageError { id } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    tab.page_error = None;
+                }
+            }
             Command::Find => self.native_action("find"),
             Command::Settings => self.native_action("settings"),
             Command::DefaultBrowser => self.native_action("default_browser"),
@@ -841,7 +1053,7 @@ impl Browser {
                     .find(|t| t.id == id && t.generation == generation)
                 {
                     tab.loading = false;
-                    self.error = Some(message);
+                    tab.page_error = Some(message);
                 }
             }
             Command::DismissError => self.error = None,
@@ -1034,7 +1246,11 @@ impl Browser {
                     .unwrap_or(0)
                     + 1;
                 let name = format!("Space {}", self.data.workspaces.len() + 1);
-                self.data.workspaces.push(Workspace { id, name });
+                self.data.workspaces.push(Workspace {
+                    id,
+                    name,
+                    project: Default::default(),
+                });
                 self.active_workspace = id;
                 if let Err(error) = self.new_tab("about:blank") {
                     eprintln!("Cannot open workspace: {error}");
@@ -1106,6 +1322,7 @@ impl Browser {
                     tab.favicon = crate::favicon::fallback(&url);
                     tab.url = url;
                     tab.loading = true;
+                    tab.page_error = None;
                     tab.site_color = None;
                     self.save();
                 } else {
@@ -1254,6 +1471,8 @@ impl Browser {
     #[cfg(target_os = "macos")]
     fn handle_menu(&mut self, event: MenuEvent) {
         match event.id.0.as_str() {
+            "inspect" => self.handle_command(Command::Inspect),
+            "screenshot" => self.handle_command(Command::Screenshot),
             "find" => self.handle_command(Command::Find),
             "settings" => self.handle_command(Command::Settings),
             "zoom_in" => self.handle_command(Command::Zoom { delta: 1 }),
@@ -1315,6 +1534,7 @@ impl Browser {
                 url: tab.url.clone(),
                 workspace: tab.workspace,
                 pinned: tab.pinned,
+                keep_awake: tab.keep_awake,
             })
             .collect()
     }
@@ -1374,6 +1594,9 @@ impl Browser {
         let active = self.active_tab();
         let state = ShellState {
             private_mode: self.private_mode,
+            split: self.split,
+            split_right: self.split_right,
+            split_ratio: self.split_ratio,
             error: self.error.as_deref(),
             settings: &self.data.settings,
             tabs: self
@@ -1392,20 +1615,22 @@ impl Browser {
                     loading: tab.loading,
                     sleeping: tab.view.is_none() && tab.url != "about:blank",
                     pinned: tab.pinned,
+                    keep_awake: tab.keep_awake,
+                    playing: tab.playing,
+                    media_suspended: tab.media_suspended,
+                    zoom: tab.zoom,
+                    page_error: tab.page_error.as_deref(),
+                    viewport: tab.viewport,
                 })
                 .collect(),
             workspaces: &self.data.workspaces,
             active: self.active,
             active_workspace: self.active_workspace,
-            bookmarks: if self.panel.as_deref() == Some("bookmarks") {
-                &self.data.bookmarks
-            } else {
+            bookmarks: &self.data.bookmarks,
+            history: if self.private_mode {
                 &[]
-            },
-            history: if self.panel.as_deref() == Some("history") {
+            } else {
                 &self.data.history
-            } else {
-                &[]
             },
             downloads: if self.panel.as_deref() == Some("downloads") {
                 &self.downloads
@@ -1447,6 +1672,34 @@ impl Browser {
             ));
         }
     }
+}
+
+fn page_bounds(
+    sidebar: f64,
+    width: f64,
+    height: f64,
+    split: bool,
+    right: bool,
+    ratio: f64,
+    viewport: Option<(u16, u16)>,
+) -> (f64, f64, f64, f64) {
+    let left = (width * ratio.clamp(0.2, 0.8) - 3.0).max(1.0);
+    let (offset, available) = if !split {
+        (0.0, width)
+    } else if right {
+        (left + 6.0, (width - left - 6.0).max(1.0))
+    } else {
+        (0.0, left)
+    };
+    let (w, h) = viewport
+        .map(|(w, h)| ((w as f64).min(available), (h as f64).min(height)))
+        .unwrap_or((available, height));
+    (
+        sidebar + offset + (available - w) / 2.0,
+        TOOLBAR_HEIGHT,
+        w.max(1.0),
+        h.max(1.0),
+    )
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
@@ -1505,6 +1758,12 @@ mod tests {
             site_color: None,
             pinned: false,
             zoom: 1.0,
+            keep_awake: false,
+            playing: false,
+            media_suspended: false,
+            page_error: None,
+            viewport: None,
+            bounds: None,
         }
     }
 

@@ -12,6 +12,40 @@ pub(crate) enum Command {
         private: bool,
     },
     Find,
+    Inspect,
+    Screenshot,
+    ProjectSettings,
+    SetProject {
+        workspace: u64,
+        project: crate::data::Project,
+    },
+    OpenProject,
+    SwitchEnvironment {
+        environment: String,
+    },
+    ClearCurrentSiteData,
+    SetSplitRatio {
+        ratio: f64,
+    },
+    SwapPanes,
+    SetViewport {
+        width: u16,
+        height: u16,
+    },
+    ToggleKeepAwake {
+        id: u64,
+    },
+    ToggleMedia {
+        id: u64,
+    },
+    MediaState {
+        id: u64,
+        generation: u64,
+        playing: bool,
+    },
+    DismissPageError {
+        id: u64,
+    },
     Zoom {
         delta: i8,
     },

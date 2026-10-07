@@ -16,12 +16,49 @@ pub struct Entry {
 pub struct Workspace {
     pub id: u64,
     pub name: String,
+    #[serde(default)]
+    pub project: Project,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Project {
+    pub local: String,
+    pub repository: String,
+    pub docs: String,
+    pub staging: String,
+    pub production: String,
+    pub split: bool,
+}
+impl Project {
+    pub fn valid(&self) -> bool {
+        [
+            &self.local,
+            &self.repository,
+            &self.docs,
+            &self.staging,
+            &self.production,
+        ]
+        .iter()
+        .all(|value| {
+            value.is_empty()
+                || (value.len() <= 4096
+                    && url::Url::parse(value).is_ok_and(|u| {
+                        matches!(u.scheme(), "http" | "https")
+                            && u.host_str().is_some()
+                            && u.username().is_empty()
+                            && u.password().is_none()
+                    }))
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionTab {
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub keep_awake: bool,
     pub url: String,
     pub workspace: u64,
 }
@@ -66,6 +103,7 @@ fn default_workspaces() -> Vec<Workspace> {
     vec![Workspace {
         id: 1,
         name: "Personal".into(),
+        project: Project::default(),
     }]
 }
 
@@ -207,6 +245,8 @@ mod tests {
     fn legacy_sessions_default_to_unpinned_and_safe_settings() {
         let data: BrowserData = serde_json::from_str(r#"{"bookmarks":[],"history":[],"session_tabs":[{"url":"https://example.com","workspace":1}]}"#).unwrap();
         assert!(!data.session_tabs[0].pinned);
+        assert!(!data.session_tabs[0].keep_awake);
+        assert!(data.workspaces[0].project.local.is_empty());
         assert!(data.settings.site_permissions.is_empty());
         assert!(data.settings.restore_session);
         assert!(data.downloads.is_empty());
