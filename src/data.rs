@@ -253,6 +253,67 @@ mod tests {
     }
 
     #[test]
+    fn developer_presets_and_keep_awake_survive_restart() {
+        let mut state = BrowserData::default();
+        state.workspaces[0].project.local = "http://localhost:3000/app".into();
+        state.workspaces[0].project.split = true;
+        state.session_tabs.push(SessionTab {
+            url: "http://localhost:3000/app".into(),
+            workspace: 1,
+            pinned: false,
+            keep_awake: true,
+        });
+        let restored: BrowserData =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            restored.workspaces[0].project.local,
+            "http://localhost:3000/app"
+        );
+        assert!(restored.workspaces[0].project.split);
+        assert!(restored.session_tabs[0].keep_awake);
+    }
+
+    #[test]
+    fn project_links_allow_web_urls_without_credentials() {
+        for value in [
+            "",
+            "http://localhost:3000",
+            "http://[::1]:8080/path",
+            "https://example.com/docs?q=rust",
+        ] {
+            assert!(
+                Project {
+                    local: value.into(),
+                    ..Project::default()
+                }
+                .valid(),
+                "{value}"
+            );
+        }
+        for value in [
+            "javascript:alert(1)",
+            "file:///tmp/private",
+            "https://user:password@example.com",
+            "https://user@example.com",
+            "not a URL",
+        ] {
+            assert!(
+                !Project {
+                    docs: value.into(),
+                    ..Project::default()
+                }
+                .valid(),
+                "{value}"
+            );
+        }
+        assert!(!Project {
+            production: "x".repeat(4097),
+            ..Project::default()
+        }
+        .valid());
+    }
+
+    #[test]
     fn bookmarks_toggle_and_history_is_bounded() {
         let mut data = BrowserData::default();
         data.toggle_bookmark("https://example.com", "Example");

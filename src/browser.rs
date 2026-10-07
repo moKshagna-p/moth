@@ -1737,8 +1737,8 @@ fn valid_split(tabs: &[Tab], active: u64, split: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_tab_index, eviction_score, photo_mime, record_tab_switch, reorder_tabs,
-        shortcut_tab_index, valid_split, Tab, IDLE_TAB_AGE,
+        adjacent_tab_index, eviction_score, host_label, page_bounds, photo_mime, record_tab_switch,
+        reorder_tabs, shortcut_tab_index, valid_split, Tab, IDLE_TAB_AGE, TOOLBAR_HEIGHT,
     };
     use std::time::{Duration, Instant};
 
@@ -1778,6 +1778,35 @@ mod tests {
         tabs[1].workspace = 2;
         assert_eq!(valid_split(&tabs, 1, Some(2)), None);
         assert_eq!(valid_split(&tabs, 2, Some(1)), None);
+    }
+
+    #[test]
+    fn split_bounds_leave_a_draggable_gutter_and_clamp_ratio() {
+        let left = page_bounds(220.0, 1000.0, 700.0, true, false, 0.5, None);
+        let right = page_bounds(220.0, 1000.0, 700.0, true, true, 0.5, None);
+        assert_eq!(left, (220.0, TOOLBAR_HEIGHT, 497.0, 700.0));
+        assert_eq!(right, (723.0, TOOLBAR_HEIGHT, 497.0, 700.0));
+        assert_eq!(right.0 - (left.0 + left.2), 6.0);
+        assert_eq!(
+            page_bounds(220.0, 1000.0, 700.0, true, false, -1.0, None).2,
+            197.0
+        );
+        assert_eq!(
+            page_bounds(220.0, 1000.0, 700.0, true, false, 2.0, None).2,
+            797.0
+        );
+    }
+
+    #[test]
+    fn viewport_is_centered_and_never_exceeds_its_pane() {
+        assert_eq!(
+            page_bounds(220.0, 1000.0, 700.0, false, false, 0.5, Some((390, 844))),
+            (525.0, TOOLBAR_HEIGHT, 390.0, 700.0)
+        );
+        assert_eq!(
+            page_bounds(220.0, 1000.0, 700.0, true, true, 0.5, Some((1280, 800))),
+            (723.0, TOOLBAR_HEIGHT, 497.0, 700.0)
+        );
     }
 
     #[test]
@@ -1855,5 +1884,18 @@ mod tests {
         assert_eq!(photo_mime(b"\x89PNG\r\n\x1a\nimage"), Some("image/png"));
         assert_eq!(photo_mime(b"\xff\xd8\xffimage"), Some("image/jpeg"));
         assert_eq!(photo_mime(b"not an image"), None);
+    }
+
+    #[test]
+    fn untitled_tabs_show_the_host_not_the_raw_url() {
+        assert_eq!(
+            host_label("https://github.com/tauri-apps/wry/pull/1"),
+            "github.com"
+        );
+        assert_eq!(
+            host_label("https://developer.apple.com"),
+            "developer.apple.com"
+        );
+        assert_eq!(host_label("about:blank"), "about:blank");
     }
 }
