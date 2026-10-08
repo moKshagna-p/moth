@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS("26.0")],
     targets: [
         .target(name: "MothNative", path: ".", exclude: ["Tests"],
-                sources: ["Chrome.swift", "BrowserFeatures.swift", "DeveloperTools.swift", "AdBlocker.swift", "BrowserPopup.swift"]),
+                sources: ["Chrome.swift", "BrowserFeatures.swift", "DeveloperTools.swift", "AdBlocker.swift", "BrowserPopup.swift", "LocalProject.swift", "ProjectProcess.swift", "LocalProjects.swift"]),
         .testTarget(name: "MothNativeTests", dependencies: ["MothNative"], path: "Tests")
     ],
     swiftLanguageModes: [.v5]

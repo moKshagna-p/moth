@@ -844,6 +844,7 @@ impl Browser {
             }
             Command::Screenshot => self.native_action("screenshot"),
             Command::ProjectSettings => self.native_action("project"),
+            Command::LocalProjects => self.native_action("local_projects"),
             Command::ClearCurrentSiteData => self.native_action("clear_current_site"),
             Command::SetProject { workspace, project } => {
                 if !project.valid() {

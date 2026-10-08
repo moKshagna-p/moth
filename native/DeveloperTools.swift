@@ -55,6 +55,7 @@ enum PaletteSearch {
         let actions: [(String, String, String, String)] = [
             ("Web Inspector", "inspect", "curlybraces", "⌥⌘I"),
             ("Find in Page", "find", "text.magnifyingglass", "⌘F"),
+            ("Projects", "local_projects", "folder", ""),
             ("Open Project", "open_project", "folder", ""),
             ("Project Preset", "project_settings", "folder.badge.gearshape", ""),
             ("Save Viewport Screenshot", "screenshot", "camera", "⇧⌘S"),
@@ -131,6 +132,7 @@ struct DeveloperMenu: View {
                 Button("Close Split") { model.send("close_split") }
             }
             Divider()
+            Button("Projects…") { ProjectLauncher.show(model) }
             Button("Project Preset…") { model.send("project_settings") }
             Button("Open Project") { model.send("open_project") }
             if let project = model.activeWorkspace?.project {

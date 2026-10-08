@@ -142,6 +142,7 @@ struct BrowserSettings: Codable {
         return "\(scheme.lowercased())://\(host.lowercased())" + (port.map { ":\($0)" } ?? "")
     }
     static func removeWindow(_ id: UInt64) {
+        ProjectLauncher.removeWindow(id)
         privateStores.removeValue(forKey: id)
         for page in pages.values where page.window == id { page.closePopups(); page.container.removeFromSuperview() }
         pages = pages.filter { $0.value.window != id }
@@ -274,6 +275,7 @@ struct BrowserSettings: Codable {
             panel.contentView = NSHostingView(rootView: SettingsView(model: model, settings: settings))
             panel.center(); panel.makeKeyAndOrderFront(nil); settingsWindows[window] = panel
         case "settings_saved": settingsWindows.removeValue(forKey: window)?.close()
+        case "local_projects": ProjectLauncher.show(model)
         case "project":
             if let existing = projectWindows[window], existing.isVisible { existing.makeKeyAndOrderFront(nil); return }
             guard let workspace = model.activeWorkspace else { return }

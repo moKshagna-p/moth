@@ -16,6 +16,9 @@ fn main() {
         .arg("native/DeveloperTools.swift")
         .arg("native/AdBlocker.swift")
         .arg("native/BrowserPopup.swift")
+        .arg("native/LocalProject.swift")
+        .arg("native/ProjectProcess.swift")
+        .arg("native/LocalProjects.swift")
         .arg("-o")
         .arg(out.join("libmoth_chrome.a"))
         .status()
@@ -32,6 +35,9 @@ fn main() {
     println!("cargo:rerun-if-changed=native/DeveloperTools.swift");
     println!("cargo:rerun-if-changed=native/AdBlocker.swift");
     println!("cargo:rerun-if-changed=native/BrowserPopup.swift");
+    println!("cargo:rerun-if-changed=native/LocalProject.swift");
+    println!("cargo:rerun-if-changed=native/ProjectProcess.swift");
+    println!("cargo:rerun-if-changed=native/LocalProjects.swift");
 }
 
 #[cfg(not(target_os = "macos"))]

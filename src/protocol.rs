@@ -15,6 +15,7 @@ pub(crate) enum Command {
     Inspect,
     Screenshot,
     ProjectSettings,
+    LocalProjects,
     SetProject {
         workspace: u64,
         project: crate::data::Project,

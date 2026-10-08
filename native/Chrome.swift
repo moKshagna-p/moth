@@ -71,6 +71,7 @@ struct ChromeSnapshot: Decodable {
     @Published var address = ""
     @Published var addressFocus = 0
     @Published var paletteMode: PaletteMode?
+    @Published var projectsVisible = false
     @Published var paletteFocus = 0
     @Published var paletteQuery = "" { didSet { rebuildPalette(reset: true) } }
     @Published var paletteResults: [PaletteResult] = []
@@ -199,6 +200,7 @@ struct ChromeSnapshot: Decodable {
     }
     func showNewTab() { showPalette(.newTab) }
     func showPalette(_ mode: PaletteMode) {
+        projectsVisible = false
         paletteQuery = ""
         paletteMode = mode
         rebuildPalette(reset: true)
@@ -206,6 +208,7 @@ struct ChromeSnapshot: Decodable {
         DispatchQueue.main.async { self.paletteFocus += 1 }
     }
     func closePalette() {
+        projectsVisible = false
         paletteMode = nil
         bridge?.setPaletteVisible(false)
     }
@@ -429,6 +432,7 @@ private final class ChromeHostingView: NSHostingView<ChromeSurface> {
         let local = convert(event.locationInWindow, from: nil)
         guard rootView.model.swipeWorkspaces,
               rootView.model.paletteMode == nil,
+              !rootView.model.projectsVisible,
               bounds.contains(local), local.x < sidebarWidth,
               event.hasPreciseScrollingDeltas,
               !event.phase.isEmpty,
@@ -610,6 +614,17 @@ private struct SidebarView: View {
                     .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.18), value: workspaceTabs.map(\.id))
                 }
 
+                Button { ProjectLauncher.show(model) } label: {
+                    Label("Projects", systemImage: "folder")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12).frame(height: 32)
+                }.buttonStyle(.plain)
+                    .glassEffect(.regular.interactive(), in: Capsule())
+                    .disabled(model.snapshot?.private_mode != false)
+                    .help("Local projects and dev servers")
+                    .padding(.horizontal, 10).padding(.bottom, 10)
+
                 workspaceSwitcher
                     .padding(.horizontal, 10)
                     .padding(.bottom, 14)
@@ -789,9 +804,15 @@ private struct PaletteOverlay: View {
             ZStack {
                 Color.black.opacity(0.16).ignoresSafeArea()
                     .onTapGesture { model.closePalette() }
-                CommandPalette(model: model)
-                    .frame(width: min(560, max(1, geometry.size.width - 32)))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.projectsVisible {
+                    LocalProjectsView(model: model, close: { model.closePalette() })
+                        .frame(width: min(460, max(1, geometry.size.width - 32)))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    CommandPalette(model: model)
+                        .frame(width: min(560, max(1, geometry.size.width - 32)))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }
     }
@@ -917,7 +938,9 @@ private struct PhotoPositionEditor: View {
         self.photoControls = photoControls
         if escapeMonitor == nil {
             escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, event.window == self.parent?.window, self.model.paletteMode != nil, event.keyCode == 53 else { return event }
+                guard let self, event.window == self.parent?.window, event.keyCode == 53 else { return event }
+                if ProjectLauncher.isVisible(self.model.windowID) { ProjectLauncher.hide(self.model.windowID); return nil }
+                guard self.model.paletteMode != nil else { return event }
                 self.model.closePalette()
                 return nil
             }
@@ -967,7 +990,7 @@ private struct PhotoPositionEditor: View {
         guard let parent, let developerOverlay else { return }
         parent.addSubview(developerOverlay, positioned: .above, relativeTo: nil)
         BrowserFeatures.layoutFind(model.windowID)
-        if model.paletteMode != nil, let palette { parent.addSubview(palette, positioned: .above, relativeTo: nil) }
+        if model.paletteMode != nil || model.projectsVisible, let palette { parent.addSubview(palette, positioned: .above, relativeTo: nil) }
     }
     func updatePhotoControls() {
         guard let parent, let photoControls else { return }
