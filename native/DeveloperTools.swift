@@ -54,6 +54,7 @@ enum PaletteSearch {
         }
         let actions: [(String, String, String, String)] = [
             ("Web Inspector", "inspect", "curlybraces", "⌥⌘I"),
+            ("Picture in Picture", "picture_in_picture", "pip", ""),
             ("Find in Page", "find", "text.magnifyingglass", "⌘F"),
             ("Projects", "local_projects", "folder", ""),
             ("Open Project", "open_project", "folder", ""),
@@ -101,12 +102,11 @@ enum PaletteSearch {
     }
 }
 
-struct DeveloperMenu: View {
+struct DeveloperMenuContent: View {
     @ObservedObject var model: ChromeModel
     var body: some View {
-        Menu {
+        Group {
             Button("Web Inspector    ⌥⌘I") { model.send("inspect") }
-            Button("Find in Page…    ⌘F") { model.send("find") }
             Button("Save Viewport Screenshot…    ⇧⌘S") { model.send("screenshot") }
             Divider()
             Menu("Viewport Size") {
@@ -146,15 +146,7 @@ struct DeveloperMenu: View {
                 Button(tab.media_suspended ? "Resume Media" : "Suspend Media") { model.send("toggle_media", ["id": tab.id]) }
             }
             Button("Clear This Website’s Data…") { model.send("clear_current_site_data") }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "curlybraces").font(.system(size: 14, weight: .medium))
-                if let tab = model.activeTab, abs(tab.zoom - 1) > 0.001 {
-                    Text("\(Int((tab.zoom * 100).rounded()))%").font(.system(size: 10, design: .monospaced))
-                }
-            }.padding(.horizontal, 9).frame(height: 30).glassEffect(.regular.interactive(), in: Capsule())
-        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
-            .help("Developer Tools").accessibilityLabel("Developer Tools")
+        }
     }
     private func viewport(_ width: Int, _ height: Int) { model.send("set_viewport", ["width": width, "height": height]) }
 }

@@ -14,6 +14,7 @@ pub(crate) enum Command {
     Find,
     Inspect,
     Screenshot,
+    PictureInPicture,
     ProjectSettings,
     LocalProjects,
     SetProject {
@@ -43,6 +44,8 @@ pub(crate) enum Command {
         id: u64,
         generation: u64,
         playing: bool,
+        #[serde(default)]
+        picture_in_picture: bool,
     },
     DismissPageError {
         id: u64,

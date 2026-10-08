@@ -75,6 +75,7 @@ struct Tab {
     zoom: f64,
     keep_awake: bool,
     playing: bool,
+    picture_in_picture: bool,
     media_suspended: bool,
     page_error: Option<String>,
     viewport: Option<(u16, u16)>,
@@ -127,6 +128,7 @@ struct TabState<'a> {
     pinned: bool,
     keep_awake: bool,
     playing: bool,
+    picture_in_picture: bool,
     media_suspended: bool,
     zoom: f64,
     page_error: Option<&'a str>,
@@ -391,10 +393,11 @@ impl Browser {
                 }
             }
             if tab.visible != visible {
-                if let Some(view) = &tab.view {
-                    let _ = view.set_visible(visible);
+                if let Some(_view) = &tab.view {
                     #[cfg(target_os = "macos")]
                     crate::native_chrome::page_visible(self.key, tab.id, visible);
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = _view.set_visible(visible);
                 }
                 tab.visible = visible;
             }
@@ -431,6 +434,7 @@ impl Browser {
             zoom: 1.0,
             keep_awake: false,
             playing: false,
+            picture_in_picture: false,
             media_suspended: false,
             page_error: None,
             viewport: None,
@@ -475,6 +479,7 @@ impl Browser {
             zoom: 1.0,
             keep_awake: session.keep_awake,
             playing: false,
+            picture_in_picture: false,
             media_suspended: false,
             page_error: None,
             viewport: None,
@@ -743,6 +748,7 @@ impl Browser {
                 && !tab.pinned
                 && !tab.keep_awake
                 && !tab.playing
+                && !tab.picture_in_picture
                 && !self.private_mode
                 && tab.view.is_some()
                 && eviction_score(now.duration_since(tab.last_used), tab.activations)
@@ -770,6 +776,7 @@ impl Browser {
                         && !tab.pinned
                         && !tab.keep_awake
                         && !tab.playing
+                        && !tab.picture_in_picture
                         && tab.view.is_some()
                 })
                 .max_by_key(|(_, tab)| {
@@ -842,6 +849,7 @@ impl Browser {
                     }
                 }
             }
+            Command::PictureInPicture => self.native_action("picture_in_picture"),
             Command::Screenshot => self.native_action("screenshot"),
             Command::ProjectSettings => self.native_action("project"),
             Command::LocalProjects => self.native_action("local_projects"),
@@ -929,6 +937,7 @@ impl Browser {
                 id,
                 generation,
                 playing,
+                picture_in_picture,
             } => {
                 if let Some(tab) = self
                     .tabs
@@ -936,6 +945,7 @@ impl Browser {
                     .find(|t| t.id == id && t.generation == generation && t.view.is_some())
                 {
                     tab.playing = playing;
+                    tab.picture_in_picture = picture_in_picture;
                 }
                 self.refresh();
                 return;
@@ -1496,6 +1506,7 @@ impl Browser {
     fn handle_menu(&mut self, event: MenuEvent) {
         match event.id.0.as_str() {
             "inspect" => self.handle_command(Command::Inspect),
+            "picture_in_picture" => self.handle_command(Command::PictureInPicture),
             "screenshot" => self.handle_command(Command::Screenshot),
             "find" => self.handle_command(Command::Find),
             "settings" => self.handle_command(Command::Settings),
@@ -1641,6 +1652,7 @@ impl Browser {
                     pinned: tab.pinned,
                     keep_awake: tab.keep_awake,
                     playing: tab.playing,
+                    picture_in_picture: tab.picture_in_picture,
                     media_suspended: tab.media_suspended,
                     zoom: tab.zoom,
                     page_error: tab.page_error.as_deref(),
@@ -1789,6 +1801,7 @@ mod tests {
             zoom: 1.0,
             keep_awake: false,
             playing: false,
+            picture_in_picture: false,
             media_suspended: false,
             page_error: None,
             viewport: None,

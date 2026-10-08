@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import Network
 import XCTest
 @testable import MothNative
 
@@ -55,6 +56,70 @@ import XCTest
         XCTAssertEqual(display(view, base: "http://127.0.0.1:3000"), ["inline", "block"])
         XCTAssertEqual(display(view, base: "http://[::1]:3000"), ["inline", "block"])
     }
+    func testNetworkRequestsAreBlockedAndRestoredByExceptions() throws {
+        _ = NSApplication.shared
+        let server = try NWListener(using: .tcp, on: .any)
+        var ready = false, requests = 0
+        server.stateUpdateHandler = { state in if case .ready = state { ready = true } }
+        server.newConnectionHandler = { connection in
+            connection.start(queue: .main)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                guard data != nil else { connection.cancel(); return }
+                requests += 1
+                let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK"
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+            }
+        }
+        server.start(queue: .main)
+        defer { server.cancel() }
+        waitUntil { ready }
+        let port = try XCTUnwrap(server.port?.rawValue)
+        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 400, height: 300), configuration: configuration)
+        func install(exceptions: [String]) throws {
+            var rules = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(AdBlocker.encodedRules(exceptions: exceptions).utf8)) as? [[String: Any]])
+            // Substitute only the first blocked hostname for a hermetic loopback server.
+            // The production action, third-party trigger, and top-site exceptions stay intact.
+            rules[0]["trigger"] = ["url-filter": AdBlocker.filter(for: "127.0.0.1"), "load-type": ["third-party"]]
+            let encoded = String(decoding: try JSONSerialization.data(withJSONObject: rules), as: UTF8.self)
+            var done = false
+            configuration.userContentController.removeAllContentRuleLists()
+            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "Moth.NetworkRegression", encodedContentRuleList: encoded) { list, error in
+                XCTAssertNil(error)
+                if let list { configuration.userContentController.add(list) }
+                done = true
+            }
+            waitUntil { done }
+        }
+        func fetch(base: String) -> String? {
+            view.loadHTMLString("<html><body>Network fixture</body></html>", baseURL: URL(string: base))
+            waitUntil { !view.isLoading }
+            view.evaluateJavaScript("window.outcome = ''; fetch('http://127.0.0.1:\(port)/ad', {signal: AbortSignal.timeout(3000)}).then(() => outcome = 'loaded').catch(() => outcome = 'blocked'); true")
+            var outcome: String?
+            waitUntil {
+                var done = false
+                view.evaluateJavaScript("window.outcome") { value, _ in outcome = value as? String; done = true }
+                let deadline = Date().addingTimeInterval(1)
+                while !done, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+                return outcome == "loaded" || outcome == "blocked"
+            }
+            return outcome
+        }
+        try install(exceptions: [])
+        XCTAssertEqual(fetch(base: "http://example.com"), "blocked")
+        XCTAssertEqual(requests, 0)
+        configuration.userContentController.removeAllContentRuleLists()
+        XCTAssertEqual(fetch(base: "http://example.com"), "loaded")
+        XCTAssertEqual(requests, 1)
+        try install(exceptions: ["example.com"])
+        XCTAssertEqual(fetch(base: "http://example.com"), "loaded")
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(fetch(base: "http://www.example.com"), "blocked")
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(fetch(base: "http://localhost"), "loaded")
+        XCTAssertEqual(requests, 3)
+    }
+
     func testSettingsChangedDuringCompilationNeverInstallStaleRules() {
         let view = WKWebView()
         let page = PageDelegate(window: 989, id: 2, generation: 1, webView: view)

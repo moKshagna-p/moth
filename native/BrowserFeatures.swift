@@ -177,15 +177,8 @@ struct BrowserSettings: Codable {
                 MainActor.assumeIsolated {
                     prunePages()
                     for page in pages.values {
-                        guard let webView = page.webView else { continue }
-                        webView.requestMediaPlaybackState { [weak page] state in
-                            guard let page else { return }
-                            let playing = state == .playing
-                            if page.playing != playing {
-                                page.playing = playing
-                                page.model?.send("media_state", ["id": page.id, "generation": page.generation, "playing": playing])
-                            }
-                        }
+                        guard page.webView != nil else { continue }
+                        page.updateMediaState()
                     }
                     if pages.isEmpty { mediaTimer?.invalidate(); mediaTimer = nil }
                 }
@@ -291,6 +284,7 @@ struct BrowserSettings: Codable {
             let host = NSHostingView(rootView: FindView(webView: webView, dismiss: { closeFind(window) }))
             findViews[window] = host; findTabs[window] = id
             parent.addSubview(host); layoutFind(window)
+        case "picture_in_picture": PictureInPicture.toggle(page)
         case "screenshot": saveScreenshot(page, model: model)
         case "clear_current_site": clearCurrentSite(page, model: model)
         case "suspend_media": page?.webView?.setAllMediaPlaybackSuspended(true, completionHandler: nil)
@@ -313,6 +307,13 @@ struct BrowserSettings: Codable {
     }
 }
 
+@MainActor final class PageContainer: NSView {
+    var acceptsInteraction = true
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        acceptsInteraction ? super.hitTest(point) : nil
+    }
+}
+
 // Forward callbacks not handled here to Wry, preserving its navigation and file dialogs.
 @MainActor final class PageDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     let window: UInt64
@@ -321,10 +322,14 @@ struct BrowserSettings: Codable {
     weak var webView: WKWebView?
     // WebKit docks its inspector against the inspected view's superview.
     // A pane-sized parent keeps those layout changes inside the pane.
-    let container: NSView
+    let container: PageContainer
     let navigation: WKNavigationDelegate?
     let ui: WKUIDelegate?
     var focusObserver: Any?
+    var automaticPresentation = AutomaticPictureInPicture()
+    private var windowFocused = true
+    var pictureInPicture = false
+    private(set) var visible: Bool
     var playing = false
     var mediaSuspended = false
     var adPreferences = AdBlockPreferences()
@@ -334,8 +339,9 @@ struct BrowserSettings: Codable {
     init(window: UInt64, id: UInt64, generation: UInt64, webView: WKWebView, uiDelegate: WKUIDelegate? = nil) {
         self.window = window; self.id = id; self.generation = generation; self.webView = webView
         navigation = webView.navigationDelegate; ui = uiDelegate ?? webView.uiDelegate
-        container = NSView(frame: webView.frame)
+        container = PageContainer(frame: webView.frame)
         container.isHidden = webView.isHidden
+        visible = !webView.isHidden
         if let parent = webView.superview {
             parent.addSubview(container, positioned: .above, relativeTo: webView)
             webView.removeFromSuperview()
@@ -344,13 +350,25 @@ struct BrowserSettings: Codable {
             webView.autoresizingMask = [.width, .height]
         }
         super.init()
+        windowFocused = webView.window?.isKeyWindow ?? true
+        // Native notifications also cover switching to another app or macOS Space.
+        NotificationCenter.default.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: NSWindow.didResignKeyNotification, object: nil)
         focusObserver = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
             guard let self, self.popup == nil, let view = self.webView, event.window == view.window,
-                  !view.isHidden, !self.container.isHidden, view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
+                  self.visible, !view.isHidden, !self.container.isHidden, view.bounds.contains(view.convert(event.locationInWindow, from: nil)) else { return event }
             self.model?.send("focus_pane", ["id": self.id]); return event
         }
     }
-    deinit { if let focusObserver { NSEvent.removeMonitor(focusObserver) } }
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        if let focusObserver { NSEvent.removeMonitor(focusObserver) }
+    }
+    @objc private func windowFocusChanged(_ notification: Notification) {
+        guard let source = notification.object as? NSWindow, source === webView?.window else { return }
+        windowFocused = notification.name == NSWindow.didBecomeKeyNotification
+        reconcilePresentation()
+    }
     var model: ChromeModel? { ChromeBridge.instances[window]?.model }
     override func responds(to selector: Selector!) -> Bool {
         super.responds(to: selector) || navigation?.responds(to: selector) == true || ui?.responds(to: selector) == true
@@ -360,6 +378,66 @@ struct BrowserSettings: Codable {
         if ui?.responds(to: selector) == true { return ui }
         return super.forwardingTarget(for: selector)
     }
+    func updateMediaState() {
+        guard let webView else { return }
+        webView.requestMediaPlaybackState { [weak self, weak webView] state in
+            guard let self, let webView, self.webView === webView else { return }
+            webView.evaluateJavaScript(PictureInPicture.stateScript) { [weak self, weak webView] value, error in
+                guard let self, let webView, self.webView === webView else { return }
+                let playing = state == .playing
+                let pip = error == nil ? value as? Bool == true : self.pictureInPicture
+                guard self.playing != playing || self.pictureInPicture != pip else { return }
+                self.playing = playing; self.pictureInPicture = pip
+                if !pip && !self.automaticPresentation.pending { self.automaticPresentation.dismissed() }
+                self.applyVisibility()
+                self.sendMediaState()
+            }
+        }
+    }
+
+    private func sendMediaState() {
+        model?.send("media_state", ["id": id, "generation": generation,
+            "playing": playing, "picture_in_picture": pictureInPicture])
+    }
+    func setVisible(_ visible: Bool) {
+        self.visible = visible
+        reconcilePresentation()
+    }
+
+    private func reconcilePresentation() {
+        let action = automaticPresentation.update(foreground: visible && windowFocused)
+        performAutomaticPresentation(action)
+        applyVisibility()
+    }
+    private func performAutomaticPresentation(_ action: AutomaticPictureInPicture.Action) {
+        guard action != .none, let webView else { return }
+        let script = action == .enter ? PictureInPicture.automaticEntryScript : PictureInPicture.automaticExitScript
+        webView.evaluateJavaScript(script, in: nil, in: .page) { [weak self, weak webView] result in
+            guard let self, let webView, self.webView === webView else { return }
+            var entered = false
+            if case .success(let value) = result {
+                entered = value as? String == "entered"
+                if entered || value as? String == "existing" { self.pictureInPicture = true }
+                if value as? String == "exited" { self.pictureInPicture = false }
+            }
+            let next = self.automaticPresentation.completed(action, entered: entered)
+            self.performAutomaticPresentation(next)
+            self.applyVisibility()
+            self.sendMediaState()
+            self.updateMediaState()
+        }
+    }
+    private func applyVisibility() {
+        // Hiding a WKWebView ends native PiP. Keep its attachment alive, with an
+        // invisible, non-interactive pane until the floating player is dismissed.
+        let hidden = !visible && !pictureInPicture && !automaticPresentation.pending
+        webView?.isHidden = hidden
+        container.isHidden = hidden
+        container.alphaValue = visible ? 1 : 0
+        container.acceptsInteraction = visible
+        container.setAccessibilityHidden(!visible)
+    }
+
     func prepareAdBlocking(completion: @escaping (Bool) -> Void) {
         let requested = adPreferences
         AdBlocker.shared.rules(for: requested) { [weak self] result in
@@ -528,7 +606,7 @@ func moth_page_layout(_ window: UInt64, _ id: UInt64, _ x: Double, _ y: Double, 
 }
 @_cdecl("moth_page_visible")
 func moth_page_visible(_ window: UInt64, _ id: UInt64, _ visible: Bool) {
-    MainActor.assumeIsolated { BrowserFeatures.pages["\(window):\(id)"]?.container.isHidden = !visible }
+    MainActor.assumeIsolated { BrowserFeatures.pages["\(window):\(id)"]?.setVisible(visible) }
 }
 @_cdecl("moth_page_action")
 func moth_page_action(_ window: UInt64, _ id: UInt64, _ action: UnsafePointer<CChar>?) {

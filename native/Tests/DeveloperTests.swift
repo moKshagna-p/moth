@@ -58,6 +58,7 @@ import XCTest
         XCTAssertEqual(saved.first?.command, "open_new_tab")
         XCTAssertEqual(PaletteSearch.results(snapshot: state, query: "Old Project", newTab: false).first?.id, "saved:https://old.example.com")
         XCTAssertEqual(PaletteSearch.results(snapshot: state, query: "Personal", newTab: false).first?.command, "switch_workspace")
+        XCTAssertEqual(PaletteSearch.results(snapshot: state, query: "Picture in Picture", newTab: false).first?.command, "picture_in_picture")
         XCTAssertEqual(PaletteSearch.results(snapshot: state, query: "Inspector", newTab: false).first?.shortcut, "⌥⌘I")
         XCTAssertEqual(PaletteSearch.results(snapshot: state, query: "Staging", newTab: false).first?.command, "switch_environment")
     }
@@ -108,6 +109,9 @@ import XCTest
         XCTAssertEqual(chrome.frame, CGRect(x: 0, y: 700, width: 1220, height: 50))
         XCTAssertEqual(delegate.container.frame.width, 497)
         moth_page_visible(99, 1, false)
+        let deadline = Date().addingTimeInterval(10)
+        while delegate.automaticPresentation.pending, Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        XCTAssertFalse(delegate.automaticPresentation.pending)
         XCTAssertTrue(delegate.container.isHidden)
         moth_page_visible(99, 1, true)
         XCTAssertFalse(delegate.container.isHidden)

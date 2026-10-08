@@ -125,7 +125,7 @@ struct AdBlockPreferences: Hashable {
                 .foregroundStyle(model.chromeInk)
                 .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
                 .frame(width: 30, height: 30)
-                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Rectangle())
         }
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         .help("Ad Blocking · " + status).accessibilityLabel("Ad Blocking").accessibilityValue(status)

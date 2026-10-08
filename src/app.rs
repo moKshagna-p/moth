@@ -321,6 +321,8 @@ fn setup_menu(proxy: EventLoopProxy<BrowserEvent>) -> Menu {
         Code::KeyS,
         command | Modifiers::SHIFT,
     );
+    let picture_in_picture =
+        muda::MenuItem::with_id("picture_in_picture", "Picture in Picture", true, None);
     let find = shortcut("find", "Find in Page…", Code::KeyF, command);
     let zoom_in = shortcut("zoom_in", "Zoom In", Code::Equal, command);
     let zoom_out = shortcut("zoom_out", "Zoom Out", Code::Minus, command);
@@ -345,6 +347,7 @@ fn setup_menu(proxy: EventLoopProxy<BrowserEvent>) -> Menu {
         &[
             &inspect,
             &screenshot,
+            &picture_in_picture,
             &find,
             &zoom_in,
             &zoom_out,

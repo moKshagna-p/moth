@@ -17,6 +17,7 @@ struct TabInfo: Decodable, Identifiable {
     let pinned: Bool
     let keep_awake: Bool
     let playing: Bool
+    let picture_in_picture: Bool?
     let media_suspended: Bool
     let zoom: Double
     let page_error: String?
@@ -251,6 +252,7 @@ private struct SymbolButton: View {
     var enabled = true
     var size: CGFloat = 30
     var spinning = false
+    var grouped = false
     var status = ""
     var action: () -> Void
 
@@ -261,7 +263,7 @@ private struct SymbolButton: View {
                 .symbolEffect(.rotate.clockwise.wholeSymbol, options: .repeating,
                               isActive: spinning && !reduceMotion)
                 .frame(width: size, height: size)
-                .glassEffect(.regular.interactive(enabled), in: Circle())
+                .modifier(SymbolSurface(grouped: grouped, enabled: enabled))
         }
         .buttonStyle(.plain)
         .foregroundStyle((colorScheme == .dark ? Color.white : Color(white: 0.08)).opacity(enabled ? 1 : 0.4))
@@ -269,6 +271,15 @@ private struct SymbolButton: View {
         .help(label)
         .accessibilityLabel(label)
         .accessibilityValue(status)
+    }
+}
+
+private struct SymbolSurface: ViewModifier {
+    let grouped: Bool
+    let enabled: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if grouped { content }
+        else { content.glassEffect(.regular.interactive(enabled), in: Circle()) }
     }
 }
 
@@ -643,33 +654,19 @@ private struct SidebarView: View {
     private var workspaceSwitcher: some View {
         HStack(spacing: 10) {
             Menu {
-                if model.snapshot?.private_mode == true { Text("Private Window — browsing is not saved") }
-                Button("Settings…") { model.send("settings") }
-                Button("New Window") { model.send("new_window", ["private": false]) }
-                Button("New Private Window") { model.send("new_window", ["private": true]) }
-                Button("Close Split View") { model.send("close_split") }
-                Button("New Tab") { model.showNewTab() }
-                Divider()
                 ForEach(model.snapshot?.workspaces ?? []) { workspace in
-                    Button(workspace.name) { model.send("switch_workspace", ["id": workspace.id]) }
+                    Button { model.send("switch_workspace", ["id": workspace.id]) } label: {
+                        if workspace.id == model.snapshot?.active_workspace {
+                            Label(workspace.name, systemImage: "checkmark")
+                        } else { Text(workspace.name) }
+                    }
                 }
-                Toggle("Swipe to switch workspaces", isOn: $model.swipeWorkspaces)
-                Toggle("Website color highlights", isOn: $model.matchSiteColors)
-                Button(model.customizingWallpaper ? "Hide wallpaper controls" : "Customize wallpaper") {
-                    model.customizingWallpaper.toggle()
-                    model.bridge?.updatePhotoControls()
-                }
-                Button("Project Preset…") { model.send("project_settings") }
-                Button("Open Project") { model.send("open_project") }
+                Divider()
                 Button("New Workspace") { model.send("new_workspace") }
                 Button("Rename Workspace") {
                     model.workspaceName = model.activeWorkspace?.name ?? ""
                     model.renamingWorkspace = true
                 }
-                Divider()
-                Button("Bookmarks") { model.send("show_panel", ["panel": "bookmarks"]) }
-                Button("History") { model.send("show_panel", ["panel": "history"]) }
-                Button("Downloads") { model.send("show_panel", ["panel": "downloads"]) }
             } label: {
                 HStack(spacing: 7) {
                     Circle().frame(width: 5, height: 5)
@@ -681,8 +678,8 @@ private struct SidebarView: View {
             .menuStyle(.button)
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .help("Workspace and browser actions")
-            .accessibilityLabel("Workspace and browser actions")
+            .help("Switch or manage workspaces")
+            .accessibilityLabel("Switch or manage workspaces")
             Spacer(minLength: 4)
             SymbolButton(symbol: "plus", label: "New Tab (⌘T)") { model.showNewTab() }
         }
@@ -734,12 +731,14 @@ private struct ToolbarView: View {
             .glassEffect(.regular.interactive(), in: Capsule())
             Spacer(minLength: 8)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 2) {
                 AdBlockMenu(model: model)
-                DeveloperMenu(model: model)
-                SymbolButton(symbol: model.snapshot?.bookmarked == true ? "star.fill" : "star", label: "Bookmark (⌘D)") { model.send("toggle_bookmark") }
-                SymbolButton(symbol: "magnifyingglass", label: "Quick Switch (⌘K)") { model.showSwitcher() }
+                SymbolButton(symbol: model.snapshot?.bookmarked == true ? "star.fill" : "star",
+                             label: "Bookmark (⌘D)", grouped: true) { model.send("toggle_bookmark") }
+                BrowserMenu(model: model)
             }
+            .padding(.horizontal, 4)
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .padding(.horizontal, 17)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -747,6 +746,48 @@ private struct ToolbarView: View {
         .clipped()
         .onChange(of: model.addressFocus) { _, _ in addressFocused = true }
         }
+    }
+}
+
+private struct BrowserMenu: View {
+    @ObservedObject var model: ChromeModel
+    var body: some View {
+        Menu {
+            if model.snapshot?.private_mode == true { Text("Private Window — browsing is not saved") }
+            Button("Quick Switch…    ⌘K") { model.showSwitcher() }
+            Button("Find in Page…    ⌘F") { model.send("find") }
+            Button(model.activeTab?.picture_in_picture == true ? "Exit Picture in Picture" : "Picture in Picture") {
+                model.send("picture_in_picture")
+            }
+            .help("Drag a corner of the floating video to resize it.")
+            .disabled(model.activeTab == nil || model.activeTab?.url == "about:blank")
+            Divider()
+            Menu("Library") {
+                Button("Bookmarks") { model.send("show_panel", ["panel": "bookmarks"]) }
+                Button("History") { model.send("show_panel", ["panel": "history"]) }
+                Button("Downloads") { model.send("show_panel", ["panel": "downloads"]) }
+            }
+            Menu("Developer Tools") { DeveloperMenuContent(model: model) }
+            Menu("Appearance") {
+                Toggle("Swipe to switch workspaces", isOn: $model.swipeWorkspaces)
+                Toggle("Website color highlights", isOn: $model.matchSiteColors)
+                Button(model.customizingWallpaper ? "Hide Wallpaper Controls" : "Customize Wallpaper…") {
+                    model.customizingWallpaper.toggle()
+                    model.bridge?.updatePhotoControls()
+                }
+            }
+            Divider()
+            Menu("New") {
+                Button("Tab    ⌘T") { model.showNewTab() }
+                Button("Window    ⌘N") { model.send("new_window", ["private": false]) }
+                Button("Private Window    ⇧⌘N") { model.send("new_window", ["private": true]) }
+            }
+            Button("Settings…    ⌘,") { model.send("settings") }
+        } label: {
+            Image(systemName: "ellipsis").font(.system(size: 15, weight: .medium))
+                .frame(width: 30, height: 30).contentShape(Rectangle())
+        }.menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+            .help("More browser actions").accessibilityLabel("More browser actions")
     }
 }
 
