@@ -23,6 +23,8 @@ use wry::{http::Response, NewWindowResponse, PageLoadEvent, Rect, WebView, WebVi
 
 const SIDEBAR_WIDTH: f64 = 220.0;
 const TOOLBAR_HEIGHT: f64 = 50.0;
+// Match the native chrome's complete content frame.
+const CONTENT_EDGE_INSET: f64 = 6.0;
 const MAX_LIVE_TABS: usize = 8;
 const IDLE_TAB_AGE: Duration = Duration::from_secs(15 * 60);
 
@@ -68,8 +70,10 @@ struct Tab {
     activations: u32,
     url: String,
     title: String,
+    custom_title: Option<String>,
     favicon: Option<String>,
     loading: bool,
+    load_revision: u64,
     site_color: Option<[u8; 3]>,
     pinned: bool,
     zoom: f64,
@@ -80,6 +84,25 @@ struct Tab {
     page_error: Option<String>,
     viewport: Option<(u16, u16)>,
     bounds: Option<(f64, f64, f64, f64)>,
+}
+
+impl Tab {
+    fn display_title(&self) -> &str {
+        self.custom_title.as_deref().unwrap_or(&self.title)
+    }
+    fn rename(&mut self, title: &str) {
+        let title: String = title.trim().chars().take(120).collect();
+        self.custom_title = (!title.is_empty()).then_some(title);
+    }
+    fn session(&self) -> SessionTab {
+        SessionTab {
+            url: self.url.clone(),
+            workspace: self.workspace,
+            pinned: self.pinned,
+            keep_awake: self.keep_awake,
+            custom_title: self.custom_title.clone(),
+        }
+    }
 }
 
 fn reorder_tabs(tabs: &mut Vec<Tab>, id: u64, before: u64) {
@@ -122,8 +145,10 @@ struct TabState<'a> {
     workspace: u64,
     url: &'a str,
     title: &'a str,
+    custom_title: Option<&'a str>,
     favicon: Option<&'a str>,
     loading: bool,
+    load_revision: u64,
     sleeping: bool,
     pinned: bool,
     keep_awake: bool,
@@ -173,7 +198,7 @@ pub(crate) struct Browser {
     pub(crate) error: Option<String>,
     shell: WebView,
     tabs: Vec<Tab>,
-    closed_tabs: Vec<String>,
+    closed_tabs: Vec<SessionTab>,
     active: u64,
     active_workspace: u64,
     next_tab_id: u64,
@@ -350,8 +375,7 @@ impl Browser {
             || self
                 .active_tab()
                 .is_some_and(|tab| tab.url == "about:blank");
-        let content_width = (size.width - self.data.sidebar_width as f64).max(1.0);
-        let content_height = (size.height - TOOLBAR_HEIGHT).max(1.0);
+        let (content_width, content_height) = content_size(size, self.data.sidebar_width as f64);
         if self.last_size != Some((size.width, size.height)) {
             let bounds = rect(
                 self.data.sidebar_width as f64,
@@ -427,8 +451,10 @@ impl Browser {
             activations: 0,
             url: url.into(),
             title: "New tab".into(),
+            custom_title: None,
             favicon: crate::favicon::fallback(url),
             loading: url != "about:blank",
+            load_revision: 0,
             site_color: None,
             pinned: false,
             zoom: 1.0,
@@ -473,7 +499,9 @@ impl Browser {
             favicon: crate::favicon::fallback(&session.url),
             url: session.url,
             title,
+            custom_title: session.custom_title,
             loading: false,
+            load_revision: 0,
             site_color: None,
             pinned: session.pinned,
             zoom: 1.0,
@@ -546,8 +574,8 @@ impl Browser {
             .with_bounds(rect(
                 self.data.sidebar_width as f64,
                 TOOLBAR_HEIGHT,
-                (size.width - self.data.sidebar_width as f64).max(1.0),
-                (size.height - TOOLBAR_HEIGHT).max(1.0),
+                content_size(size, self.data.sidebar_width as f64).0,
+                content_size(size, self.data.sidebar_width as f64).1,
             ))
             .with_on_page_load_handler(move |event, url| {
                 let message = match event {
@@ -670,6 +698,7 @@ impl Browser {
                     workspace: self.active_workspace,
                     pinned: false,
                     keep_awake: false,
+                    custom_title: None,
                 });
                 self.tabs.last().unwrap().id
             };
@@ -730,6 +759,8 @@ impl Browser {
                 }
             }
         }
+        self.tabs[index].playing = false;
+        self.tabs[index].picture_in_picture = false;
         self.tabs[index].page_error = None;
         self.tabs[index].favicon = crate::favicon::fallback(&url);
         self.tabs[index].url = url;
@@ -810,7 +841,7 @@ impl Browser {
         let was_active = self.active == id;
         let tab = self.tabs.remove(index);
         if tab.url != "about:blank" {
-            self.closed_tabs.push(tab.url);
+            self.closed_tabs.push(tab.session());
             if self.closed_tabs.len() > 20 {
                 self.closed_tabs.remove(0);
             }
@@ -1013,10 +1044,15 @@ impl Browser {
                 }
             }
             Command::DuplicateTab { id } => {
-                if let Some(url) = self.tabs.iter().find(|t| t.id == id).map(|t| t.url.clone()) {
-                    if let Err(e) = self.new_tab(&url) {
-                        self.error = Some(e.to_string());
-                    }
+                if let Some(session) = self.tabs.iter().find(|t| t.id == id).map(Tab::session) {
+                    self.restore_tab(session);
+                    let id = self.tabs.last().unwrap().id;
+                    self.switch_tab(id);
+                }
+            }
+            Command::RenameTab { id, title } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    tab.rename(&title);
                 }
             }
             Command::TogglePin { id } => {
@@ -1183,11 +1219,19 @@ impl Browser {
                 self.data.photo_focus_y = y.min(100);
             }
             Command::ReopenClosedTab => {
-                if let Some(url) = self.closed_tabs.pop() {
-                    if let Err(error) = self.new_tab(&url) {
-                        eprintln!("Cannot reopen tab: {error}");
-                        self.closed_tabs.push(url);
+                if let Some(mut session) = self.closed_tabs.pop() {
+                    if !self
+                        .data
+                        .workspaces
+                        .iter()
+                        .any(|space| space.id == session.workspace)
+                    {
+                        session.workspace = self.active_workspace;
                     }
+                    self.active_workspace = session.workspace;
+                    self.restore_tab(session);
+                    let id = self.tabs.last().unwrap().id;
+                    self.switch_tab(id);
                 }
             }
             Command::SwitchTab { id } => self.switch_tab(id),
@@ -1238,7 +1282,15 @@ impl Browser {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) {
                     tab.page_error = None;
                     if let Some(view) = &tab.view {
-                        match view.reload() {
+                        // A provisional load may never commit a document. WKWebView's
+                        // reload then succeeds without retrying the requested URL.
+                        let result =
+                            if reload_needs_navigation(view.url().ok().as_deref(), &tab.url) {
+                                view.load_url(&tab.url)
+                            } else {
+                                view.reload()
+                            };
+                        match result {
                             Ok(()) => tab.loading = true,
                             Err(error) => {
                                 tab.loading = false;
@@ -1356,6 +1408,9 @@ impl Browser {
                     tab.favicon = crate::favicon::fallback(&url);
                     tab.url = url;
                     tab.loading = true;
+                    tab.load_revision = tab.load_revision.wrapping_add(1);
+                    tab.playing = false;
+                    tab.picture_in_picture = false;
                     tab.page_error = None;
                     tab.site_color = None;
                     self.save();
@@ -1563,15 +1618,7 @@ impl Browser {
         if self.private_mode {
             return Vec::new();
         }
-        self.tabs
-            .iter()
-            .map(|tab| SessionTab {
-                url: tab.url.clone(),
-                workspace: tab.workspace,
-                pinned: tab.pinned,
-                keep_awake: tab.keep_awake,
-            })
-            .collect()
+        self.tabs.iter().map(Tab::session).collect()
     }
     pub(crate) fn active_index(&self) -> usize {
         self.tabs
@@ -1587,6 +1634,9 @@ impl Browser {
         crate::native_chrome::action(self.key, self.active, action);
     }
     pub(crate) fn sync_data(&mut self, data: &BrowserData) {
+        if self.data.shared_matches(data, self.private_mode) {
+            return;
+        }
         self.data.settings = data.settings.clone();
         if !self.private_mode {
             self.data.bookmarks = data.bookmarks.clone();
@@ -1641,13 +1691,15 @@ impl Browser {
                     id: tab.id,
                     workspace: tab.workspace,
                     url: &tab.url,
-                    title: &tab.title,
+                    title: tab.display_title(),
+                    custom_title: tab.custom_title.as_deref(),
                     favicon: if self.private_mode {
                         None
                     } else {
                         tab.favicon.as_deref()
                     },
                     loading: tab.loading,
+                    load_revision: tab.load_revision,
                     sleeping: tab.view.is_none() && tab.url != "about:blank",
                     pinned: tab.pinned,
                     keep_awake: tab.keep_awake,
@@ -1704,7 +1756,7 @@ impl Browser {
         if let Some(tab) = active {
             self.window.set_title(&format!(
                 "{} — Moth{}",
-                tab.title,
+                tab.display_title(),
                 if self.private_mode {
                     " — Private"
                 } else {
@@ -1713,6 +1765,13 @@ impl Browser {
             ));
         }
     }
+}
+
+fn content_size(size: LogicalSize<f64>, sidebar: f64) -> (f64, f64) {
+    (
+        (size.width - sidebar - CONTENT_EDGE_INSET).max(1.0),
+        (size.height - TOOLBAR_HEIGHT - CONTENT_EDGE_INSET).max(1.0),
+    )
 }
 
 fn page_bounds(
@@ -1769,6 +1828,10 @@ fn photo_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn reload_needs_navigation(loaded_url: Option<&str>, requested_url: &str) -> bool {
+    requested_url != "about:blank" && matches!(loaded_url, None | Some("") | Some("about:blank"))
+}
+
 fn valid_split(tabs: &[Tab], active: u64, split: Option<u64>) -> Option<u64> {
     let active = tabs.iter().find(|tab| tab.id == active)?;
     let other = tabs.iter().find(|tab| Some(tab.id) == split)?;
@@ -1778,10 +1841,12 @@ fn valid_split(tabs: &[Tab], active: u64, split: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_tab_index, eviction_score, host_label, page_bounds, photo_mime, record_tab_switch,
-        reorder_tabs, shortcut_tab_index, valid_split, Tab, IDLE_TAB_AGE, TOOLBAR_HEIGHT,
+        adjacent_tab_index, content_size, eviction_score, host_label, page_bounds, photo_mime,
+        record_tab_switch, reload_needs_navigation, reorder_tabs, shortcut_tab_index, valid_split,
+        Tab, IDLE_TAB_AGE, TOOLBAR_HEIGHT,
     };
     use std::time::{Duration, Instant};
+    use tao::dpi::LogicalSize;
 
     fn tab(id: u64, last_used: Instant) -> Tab {
         Tab {
@@ -1794,8 +1859,10 @@ mod tests {
             activations: 1,
             url: "about:blank".into(),
             title: "New tab".into(),
+            custom_title: None,
             favicon: None,
             loading: false,
+            load_revision: 0,
             site_color: None,
             pinned: false,
             zoom: 1.0,
@@ -1810,6 +1877,37 @@ mod tests {
     }
 
     #[test]
+    fn reload_retries_uncommitted_documents_and_preserves_normal_reload() {
+        assert!(reload_needs_navigation(None, "https://youtube.com"));
+        assert!(reload_needs_navigation(
+            Some("about:blank"),
+            "https://youtube.com"
+        ));
+        assert!(!reload_needs_navigation(
+            Some("https://youtube.com"),
+            "https://youtube.com"
+        ));
+        assert!(!reload_needs_navigation(
+            Some("https://example.com/posted"),
+            "https://example.com"
+        ));
+        assert!(!reload_needs_navigation(Some("about:blank"), "about:blank"));
+    }
+
+    #[test]
+    fn custom_tab_names_survive_page_titles_and_session_copy() {
+        let mut tab = tab(1, Instant::now());
+        tab.rename("  My research  ");
+        tab.title = "A changing website title".into();
+        assert_eq!(tab.display_title(), "My research");
+        assert_eq!(tab.session().custom_title.as_deref(), Some("My research"));
+        tab.rename("   ");
+        assert_eq!(tab.display_title(), "A changing website title");
+        tab.rename(&"🦋".repeat(200));
+        assert_eq!(tab.display_title().chars().count(), 120);
+    }
+
+    #[test]
     fn split_requires_two_live_tabs_in_the_same_workspace() {
         let now = Instant::now();
         let mut tabs = vec![tab(1, now), tab(2, now)];
@@ -1820,6 +1918,24 @@ mod tests {
         tabs[1].workspace = 2;
         assert_eq!(valid_split(&tabs, 1, Some(2)), None);
         assert_eq!(valid_split(&tabs, 2, Some(1)), None);
+    }
+
+    #[test]
+    fn content_frame_preserves_all_edges_and_split_layout() {
+        for sidebar in [180.0, 220.0, 360.0] {
+            let (width, height) = content_size(LogicalSize::new(1220.0, 750.0), sidebar);
+            let single = page_bounds(sidebar, width, height, false, false, 0.5, None);
+            let right = page_bounds(sidebar, width, height, true, true, 0.5, None);
+            assert_eq!(single.0, sidebar);
+            assert_eq!(single.1, 50.0);
+            assert_eq!(single.0 + single.2, 1214.0);
+            assert_eq!(single.1 + single.3, 744.0);
+            assert_eq!(right.0 + right.2, 1214.0);
+        }
+        assert_eq!(
+            content_size(LogicalSize::new(100.0, 40.0), 220.0),
+            (1.0, 1.0)
+        );
     }
 
     #[test]

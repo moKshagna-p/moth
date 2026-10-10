@@ -63,6 +63,10 @@ pub(crate) enum Command {
     DuplicateTab {
         id: u64,
     },
+    RenameTab {
+        id: u64,
+        title: String,
+    },
     TogglePin {
         id: u64,
     },

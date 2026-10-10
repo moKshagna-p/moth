@@ -87,10 +87,21 @@ import XCTest
         let size = CGSize(width: 1220, height: 750)
         let left = DeveloperLayout(size: size, sidebar: 220, split: true, activeRight: false, ratio: 0.5)
         let right = DeveloperLayout(size: size, sidebar: 220, split: true, activeRight: true, ratio: 0.5)
-        XCTAssertEqual(left.active, CGRect(x: 220, y: 50, width: 497, height: 700))
-        XCTAssertEqual(left.divider, CGRect(x: 717, y: 50, width: 6, height: 700))
-        XCTAssertEqual(right.active, CGRect(x: 723, y: 50, width: 497, height: 700))
-        XCTAssertEqual(DeveloperLayout(size: size, sidebar: 220, split: false, activeRight: false, ratio: 0.5).active.width, 1000)
+        XCTAssertEqual(left.active, CGRect(x: 220, y: 50, width: 494, height: 694))
+        XCTAssertEqual(left.divider, CGRect(x: 714, y: 50, width: 6, height: 694))
+        XCTAssertEqual(right.active, CGRect(x: 720, y: 50, width: 494, height: 694))
+        XCTAssertEqual(DeveloperLayout(size: size, sidebar: 220, split: false, activeRight: false, ratio: 0.5).active,
+                       browserContentFrame(window: size, sidebar: 220))
+    }
+    func testContentFrameKeepsRightAndBottomBordersWhenSidebarResizes() {
+        let size = CGSize(width: 1220, height: 750)
+        for sidebar: CGFloat in [180, 220, 360] {
+            let content = browserContentFrame(window: size, sidebar: sidebar)
+            XCTAssertEqual(content.minX, sidebar)
+            XCTAssertEqual(content.minY, 50)
+            XCTAssertEqual(size.width - content.maxX, 6)
+            XCTAssertEqual(size.height - content.maxY, 6)
+        }
     }
     func testPageContainerConfinesLayoutAndCleansUpDetachedPages() {
         let root = NSView(frame: CGRect(x: 0, y: 0, width: 1220, height: 750))
@@ -100,6 +111,8 @@ import XCTest
         let delegate = PageDelegate(window: 99, id: 1, generation: 1, webView: page)
         BrowserFeatures.pages["99:1"] = delegate
         XCTAssertTrue(page.superview === delegate.container)
+        XCTAssertEqual(delegate.container.layer?.cornerRadius, contentCornerRadius)
+        XCTAssertEqual(delegate.container.layer?.masksToBounds, true)
         XCTAssertEqual(page.frame, delegate.container.bounds)
         moth_page_layout(99, 1, 723, 50, 497, 700)
         XCTAssertEqual(delegate.container.frame, CGRect(x: 723, y: 0, width: 497, height: 700))

@@ -3,7 +3,11 @@ fn main() {
     use std::{env, path::PathBuf, process::Command};
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-    let status = Command::new("swiftc")
+    let mut compiler = Command::new("swiftc");
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        compiler.args(["-O", "-whole-module-optimization"]);
+    }
+    let status = compiler
         .args([
             "-emit-library",
             "-static",

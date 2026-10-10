@@ -3,10 +3,10 @@ import WebKit
 
 @MainActor enum PictureInPicture {
     // Include same-origin embeds and open shadow roots without changing page controls.
-    private static let videos = #"""
+    private static func elements(_ selector: String) -> String { #"""
     const videos = [];
     function collect(root) {
-        videos.push(...root.querySelectorAll('video'));
+        videos.push(...root.querySelectorAll('\#(selector)'));
         for (const element of root.querySelectorAll('*')) {
             if (element.shadowRoot) collect(element.shadowRoot);
             if (element.tagName === 'IFRAME') {
@@ -15,6 +15,17 @@ import WebKit
         }
     }
     collect(document);
+    """# }
+    private static let videos = elements("video")
+    // WebKit also reports silent players and Web Audio contexts as playing.
+    static let mediaStateScript = "(() => {" + elements("audio,video") + #"""
+        return {
+            playing: videos.some(media => !media.paused && !media.ended && !media.muted && media.volume > 0) ||
+                (!videos.length && navigator.mediaSession?.playbackState === 'playing'),
+            pip: videos.some(media => media.webkitPresentationMode === 'picture-in-picture' ||
+                media.ownerDocument.pictureInPictureElement === media)
+        };
+    })()
     """#
     static let stateScript = "(() => {" + videos + #"""
         return videos.some(video => video.webkitPresentationMode === 'picture-in-picture' ||

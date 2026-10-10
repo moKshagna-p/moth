@@ -3,6 +3,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 private let toolbarHeight: CGFloat = 50
+let contentEdgeInset: CGFloat = 6
+let contentCornerRadius: CGFloat = 12
+
+func browserContentFrame(window: CGSize, sidebar: CGFloat) -> CGRect {
+    CGRect(x: sidebar, y: toolbarHeight,
+           width: max(1, window.width - sidebar - contentEdgeInset),
+           height: max(1, window.height - toolbarHeight - contentEdgeInset))
+}
 private let ink = Color(red: 0.16, green: 0.18, blue: 0.16)
 private let muted = Color(red: 0.44, green: 0.47, blue: 0.43)
 private let accent = Color(red: 0.29, green: 0.39, blue: 0.31)
@@ -11,8 +19,10 @@ struct TabInfo: Decodable, Identifiable {
     let id: UInt64
     let url: String
     let title: String
+    let custom_title: String?
     let favicon: String?
     let loading: Bool
+    let load_revision: UInt64?
     let sleeping: Bool
     let pinned: Bool
     let keep_awake: Bool
@@ -288,16 +298,25 @@ private struct ReloadButton: View {
     @State private var showingActivity = false
     @State private var started: ContinuousClock.Instant?
     @State private var feedbackTab: UInt64?
+    @State private var feedbackRevision: UInt64?
+    @State private var reloadRequest: UInt64 = 0
 
     private struct LoadState: Equatable {
         let tab: UInt64?
         let loading: Bool
+        let revision: UInt64?
+        let request: UInt64
     }
 
     var body: some View {
-        let state = LoadState(tab: model.activeTab?.id, loading: model.activeTab?.loading == true)
+        let state = LoadState(tab: model.activeTab?.id, loading: model.activeTab?.loading == true,
+                              revision: model.activeTab?.load_revision, request: reloadRequest)
         SymbolButton(symbol: "arrow.clockwise", label: "Reload (⌘R)",
                      spinning: showingActivity, status: state.loading ? "Reloading" : "") {
+            feedbackTab = state.tab
+            started = .now
+            showingActivity = true
+            reloadRequest &+= 1
             model.send("reload")
         }
         .task(id: state) { await updateFeedback(state) }
@@ -306,11 +325,18 @@ private struct ReloadButton: View {
     private func updateFeedback(_ state: LoadState) async {
         if feedbackTab != state.tab {
             feedbackTab = state.tab
+            feedbackRevision = state.revision
             started = nil
             showingActivity = false
         }
+        // The revision catches cached loads whose start/finish SwiftUI coalesces into one update.
+        if feedbackRevision != state.revision {
+            feedbackRevision = state.revision
+            started = .now
+            showingActivity = true
+        }
         if state.loading {
-            if !showingActivity { started = .now }
+            started = .now
             showingActivity = true
         } else {
             // Keep fast, cached reloads visible without delaying the page itself.
@@ -364,8 +390,9 @@ private struct ChromeShape: Shape {
     var sidebarWidth: CGFloat
     func path(in rect: CGRect) -> Path {
         Path { path in
-            path.addRect(CGRect(x: 0, y: 0, width: sidebarWidth, height: rect.height))
-            path.addRect(CGRect(x: sidebarWidth, y: 0, width: max(0, rect.width - sidebarWidth), height: toolbarHeight))
+            path.addRect(rect)
+            path.addRoundedRect(in: browserContentFrame(window: rect.size, sidebar: sidebarWidth),
+                                cornerSize: CGSize(width: contentCornerRadius, height: contentCornerRadius))
         }
     }
 }
@@ -387,19 +414,28 @@ private struct ChromeSurface: View {
                 .frame(width: model.windowSize.width, height: model.windowSize.height, alignment: .topLeading)
                 .blur(radius: 22, opaque: true)
                 .overlay(model.chromeScheme == .dark ? Color.black.opacity(0.16) : Color.white.opacity(0.10))
-                .clipShape(ChromeShape(sidebarWidth: model.sidebarWidth))
+                .clipShape(ChromeShape(sidebarWidth: model.sidebarWidth), style: FillStyle(eoFill: true))
                 .allowsHitTesting(false)
             }
             if !model.wallpaperVisible {
-                ChromeShape(sidebarWidth: model.sidebarWidth).fill(model.chromeScheme == .dark ? Color.black : Color.white).allowsHitTesting(false)
+                ChromeShape(sidebarWidth: model.sidebarWidth)
+                    .fill(model.chromeScheme == .dark ? Color.black : Color.white, style: FillStyle(eoFill: true))
+                    .allowsHitTesting(false)
             }
             if let color = model.siteColor {
                 // Keep the original frosted photo visible; tint only the chrome.
                 ChromeShape(sidebarWidth: model.sidebarWidth)
                     .fill(LinearGradient(colors: [color.opacity(0.14), color.opacity(0.025)],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                                         startPoint: .topLeading, endPoint: .bottomTrailing), style: FillStyle(eoFill: true))
                     .allowsHitTesting(false)
             }
+            let border = browserContentFrame(window: model.windowSize, sidebar: model.sidebarWidth)
+                .insetBy(dx: -1, dy: -1)
+            RoundedRectangle(cornerRadius: contentCornerRadius + 1)
+                .strokeBorder(model.chromeInk.opacity(NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 0.55 : 0.16), lineWidth: 1)
+                .frame(width: border.width, height: border.height)
+                .offset(x: border.minX, y: border.minY)
+                .allowsHitTesting(false)
             GlassEffectContainer(spacing: 0) {
                 HStack(alignment: .top, spacing: 0) {
                     SidebarView(model: model).frame(width: model.sidebarWidth)
@@ -494,6 +530,8 @@ private struct TabRow: View {
     @ObservedObject var model: ChromeModel
     let tab: TabInfo
     @State private var hovering = false
+    @State private var renaming = false
+    @State private var customTitle = ""
 
     private var selected: Bool { tab.id == model.snapshot?.active }
 
@@ -524,12 +562,6 @@ private struct TabRow: View {
                     }
                     if tab.keep_awake {
                         Image(systemName: "bolt.fill").font(.system(size: 8)).help("Kept awake")
-                    }
-                    if tab.pinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 8))
-                            .foregroundStyle(model.chromeMuted)
-                            .accessibilityLabel("Pinned")
                     }
                     Spacer(minLength: 4)
                     if tab.loading { ProgressView().controlSize(.mini) }
@@ -563,7 +595,18 @@ private struct TabRow: View {
         .onHover { hovering = $0 }
         .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.14), value: selected)
         .animation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
+        .alert("Rename Tab", isPresented: $renaming) {
+            TextField("Tab name", text: $customTitle)
+            Button("Rename") { model.send("rename_tab", ["id": tab.id, "title": customTitle]) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Leave the name empty to use the page title.")
+        }
         .contextMenu {
+            Button("Rename Tab…") { customTitle = tab.title; renaming = true }
+            if tab.custom_title != nil {
+                Button("Use Page Title") { model.send("rename_tab", ["id": tab.id, "title": ""]) }
+            }
             Button(tab.pinned ? "Unpin Tab" : "Pin Tab") { model.send("toggle_pin", ["id": tab.id]) }
             Button(tab.keep_awake ? "Allow Tab to Sleep" : "Keep Tab Awake") { model.send("toggle_keep_awake", ["id": tab.id]) }
             Button(tab.media_suspended ? "Resume Media" : "Suspend Media") { model.send("toggle_media", ["id": tab.id]) }
@@ -602,21 +645,25 @@ private struct TabRow: View {
 
 private struct SidebarView: View {
     @ObservedObject var model: ChromeModel
+    @AppStorage("pinnedTabsExpanded") private var pinnedTabsExpanded = true
 
     private var workspaceTabs: [TabInfo] {
         guard let snapshot = model.snapshot else { return [] }
-        return snapshot.tabs.filter { $0.workspace == snapshot.active_workspace }.sorted { $0.pinned && !$1.pinned }
+        return snapshot.tabs.filter { $0.workspace == snapshot.active_workspace }
     }
+
+    private var pinnedTabs: [TabInfo] { workspaceTabs.filter(\.pinned) }
+    private var regularTabs: [TabInfo] { workspaceTabs.filter { !$0.pinned } }
 
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 0) {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(Array(workspaceTabs.enumerated()), id: \.element.id) { index, tab in
-                            if index > 0 && workspaceTabs[index - 1].pinned && !tab.pinned {
-                                Divider().padding(.horizontal, 12).padding(.vertical, 5)
-                            }
+                        if !pinnedTabs.isEmpty {
+                            pinnedSection.padding(.bottom, 8)
+                        }
+                        ForEach(regularTabs) { tab in
                             TabRow(model: model, tab: tab).transition(.opacity)
                         }
                     }
@@ -649,6 +696,43 @@ private struct SidebarView: View {
             Button("Rename") { model.send("rename_workspace", ["name": model.workspaceName]) }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private var pinnedSection: some View {
+        VStack(spacing: 2) {
+            Button {
+                withAnimation(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    pinnedTabsExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: pinnedTabsExpanded ? "square.stack.fill" : "chevron.right")
+                        .font(.system(size: pinnedTabsExpanded ? 12 : 11, weight: .semibold))
+                        .frame(width: 16, height: 16)
+                        .accessibilityHidden(true)
+                    Text(model.activeWorkspace?.name ?? "Workspace")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                }
+                .foregroundStyle(model.chromeMuted)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(model.activeWorkspace?.name ?? "Workspace") pinned tabs")
+            .accessibilityValue("\(pinnedTabsExpanded ? "Expanded" : "Collapsed"), \(pinnedTabs.count) \(pinnedTabs.count == 1 ? "tab" : "tabs")")
+            .help(pinnedTabsExpanded ? "Collapse pinned tabs" : "Expand pinned tabs")
+
+            if pinnedTabsExpanded {
+                ForEach(pinnedTabs) { tab in
+                    TabRow(model: model, tab: tab).transition(.opacity)
+                }
+            }
+        }
+        .padding(4)
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var workspaceSwitcher: some View {

@@ -331,6 +331,8 @@ struct BrowserSettings: Codable {
     var pictureInPicture = false
     private(set) var visible: Bool
     var playing = false
+    private var mediaRevision: UInt64 = 0
+    private var checkingMedia = false
     var mediaSuspended = false
     var adPreferences = AdBlockPreferences()
     var installedAdRules: WKContentRuleList?
@@ -340,6 +342,9 @@ struct BrowserSettings: Codable {
         self.window = window; self.id = id; self.generation = generation; self.webView = webView
         navigation = webView.navigationDelegate; ui = uiDelegate ?? webView.uiDelegate
         container = PageContainer(frame: webView.frame)
+        container.wantsLayer = true
+        container.layer?.cornerRadius = contentCornerRadius
+        container.layer?.masksToBounds = true
         container.isHidden = webView.isHidden
         visible = !webView.isHidden
         if let parent = webView.superview {
@@ -378,21 +383,40 @@ struct BrowserSettings: Codable {
         if ui?.responds(to: selector) == true { return ui }
         return super.forwardingTarget(for: selector)
     }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        // An asynchronous sample from the previous document must never label a new page.
+        mediaRevision &+= 1
+        checkingMedia = false
+        applyMediaState(playing: false, pip: false)
+        self.navigation?.webView?(webView, didStartProvisionalNavigation: navigation)
+    }
     func updateMediaState() {
-        guard let webView else { return }
+        guard let webView, !webView.isLoading, !checkingMedia else { return }
+        let revision = mediaRevision
+        checkingMedia = true
         webView.requestMediaPlaybackState { [weak self, weak webView] state in
-            guard let self, let webView, self.webView === webView else { return }
-            webView.evaluateJavaScript(PictureInPicture.stateScript) { [weak self, weak webView] value, error in
-                guard let self, let webView, self.webView === webView else { return }
-                let playing = state == .playing
-                let pip = error == nil ? value as? Bool == true : self.pictureInPicture
-                guard self.playing != playing || self.pictureInPicture != pip else { return }
-                self.playing = playing; self.pictureInPicture = pip
-                if !pip && !self.automaticPresentation.pending { self.automaticPresentation.dismissed() }
-                self.applyVisibility()
-                self.sendMediaState()
+            guard let self, let webView, self.webView === webView, self.mediaRevision == revision else { return }
+            // Most tabs have no media. Avoid JavaScript and DOM scans entirely for them.
+            if state == .none && !self.pictureInPicture {
+                self.checkingMedia = false
+                self.applyMediaState(playing: false, pip: false)
+                return
+            }
+            webView.evaluateJavaScript(PictureInPicture.mediaStateScript) { [weak self, weak webView] value, error in
+                guard let self, let webView, self.webView === webView, self.mediaRevision == revision else { return }
+                self.checkingMedia = false
+                guard error == nil, let sample = value as? [String: Bool],
+                      let audible = sample["playing"], let pip = sample["pip"] else { return }
+                self.applyMediaState(playing: state == .playing && audible, pip: pip)
             }
         }
+    }
+    private func applyMediaState(playing: Bool, pip: Bool) {
+        guard self.playing != playing || pictureInPicture != pip else { return }
+        self.playing = playing; pictureInPicture = pip
+        if !pip && !automaticPresentation.pending { automaticPresentation.dismissed() }
+        applyVisibility()
+        sendMediaState()
     }
 
     private func sendMediaState() {
@@ -485,6 +509,16 @@ struct BrowserSettings: Codable {
                 self.navigation?.webView?(webView, decidePolicyFor: navigationAction, decisionHandler: decisionHandler)
             } else { decisionHandler(.allow) }
         }
+    }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        // WebKit can emit an empty response during page navigation.
+        // Wry treats its missing MIME type as a download, interrupting the page.
+        // Only real responses should reach that download policy.
+        guard navigationResponse.response.url != nil else { decisionHandler(.allow); return }
+        if navigation?.responds(to: NSSelectorFromString("webView:decidePolicyForNavigationResponse:decisionHandler:")) == true {
+            navigation?.webView?(webView, decidePolicyFor: navigationResponse, decisionHandler: decisionHandler)
+        } else { decisionHandler(.allow) }
     }
     func closePopups() {
         for popup in Array(popups.values) { popup.close() }

@@ -32,7 +32,7 @@ svg { display: block; width: 18px; height: 18px; stroke: currentColor; stroke-wi
 #start, #panel { height: 100vh; overflow-y: auto; }
 #start { display: none; position: relative; background: var(--paper); overflow: hidden; }
 #start.open { display: block; }
-#start-photo { display: none; position: absolute; left: calc(-1 * var(--sidebar-width, 220px)); top: -50px; width: calc(100% + var(--sidebar-width, 220px)); height: calc(100% + 50px); object-fit: cover; object-position: center; }
+#start-photo { display: none; position: absolute; left: calc(-1 * var(--sidebar-width, 220px)); top: -50px; width: calc(100% + var(--sidebar-width, 220px) + 6px); height: calc(100% + 56px); object-fit: cover; object-position: center; }
 #start-photo.visible { display: block; }
 .site-tile { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 7px; background: #e6eae2; color: var(--accent); font-size: 12px; font-weight: 650; text-transform: uppercase; }
 .entry-text { min-width: 0; flex: 1; }
