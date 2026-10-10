@@ -184,7 +184,8 @@ struct DeveloperLayout {
     let divider: CGRect?
     let active: CGRect
     init(size: CGSize, sidebar: CGFloat, split: Bool, activeRight: Bool, ratio: Double) {
-        let width = max(1, size.width - sidebar), height = max(1, size.height - 50)
+        let content = browserContentFrame(window: size, sidebar: sidebar)
+        let width = content.width, height = content.height
         let left = max(1, width * CGFloat(min(0.8, max(0.2, ratio))) - 3)
         divider = split ? CGRect(x: sidebar + left, y: 50, width: 6, height: height) : nil
         active = CGRect(x: sidebar + (split && activeRight ? left + 6 : 0), y: 50,
@@ -208,7 +209,7 @@ struct DeveloperOverlay: View {
                         .onHover { hovering in if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
                         .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global).onChanged { value in
                             if dragStart == nil { dragStart = model.snapshot?.split_ratio ?? 0.5 }
-                            let ratio = (dragStart ?? 0.5) + Double(value.translation.width / max(1, geometry.size.width - model.sidebarWidth))
+                            let ratio = (dragStart ?? 0.5) + Double(value.translation.width / browserContentFrame(window: geometry.size, sidebar: model.sidebarWidth).width)
                             model.send("set_split_ratio", ["ratio": ratio])
                         }.onEnded { _ in dragStart = nil })
                         .accessibilityLabel("Split divider")

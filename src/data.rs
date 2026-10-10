@@ -5,14 +5,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub url: String,
     pub title: String,
     pub visited_at: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: u64,
     pub name: String,
@@ -20,7 +20,7 @@ pub struct Workspace {
     pub project: Project,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Project {
     pub local: String,
@@ -53,8 +53,10 @@ impl Project {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTab {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
@@ -63,7 +65,7 @@ pub struct SessionTab {
     pub workspace: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrowserData {
     #[serde(default)]
     pub settings: Settings,
@@ -179,6 +181,15 @@ impl BrowserData {
         self.history.truncate(500);
     }
 
+    pub(crate) fn shared_matches(&self, other: &Self, private: bool) -> bool {
+        self.settings == other.settings
+            && (private
+                || (self.bookmarks == other.bookmarks
+                    && self.history == other.history
+                    && self.workspaces == other.workspaces
+                    && self.downloads == other.downloads))
+    }
+
     pub fn toggle_bookmark(&mut self, url: &str, title: &str) {
         if let Some(index) = self.bookmarks.iter().position(|entry| entry.url == url) {
             self.bookmarks.remove(index);
@@ -208,6 +219,20 @@ fn is_recordable(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_state_comparison_ignores_window_local_sessions_and_private_history() {
+        let original = BrowserData::default();
+        let mut other = original.clone();
+        other.active_workspace = 42;
+        other.active_tab_index = 12;
+        assert!(original.shared_matches(&other, false));
+        other.visit("https://example.com", "Example");
+        assert!(!original.shared_matches(&other, false));
+        assert!(original.shared_matches(&other, true));
+        other.settings.search_engine = "bing".into();
+        assert!(!original.shared_matches(&other, true));
+    }
 
     #[test]
     fn corrupt_state_recovers_backup_without_destroying_it() {
@@ -245,6 +270,7 @@ mod tests {
     fn legacy_sessions_default_to_unpinned_and_safe_settings() {
         let data: BrowserData = serde_json::from_str(r#"{"bookmarks":[],"history":[],"session_tabs":[{"url":"https://example.com","workspace":1}]}"#).unwrap();
         assert!(!data.session_tabs[0].pinned);
+        assert!(data.session_tabs[0].custom_title.is_none());
         assert!(!data.session_tabs[0].keep_awake);
         assert!(data.workspaces[0].project.local.is_empty());
         assert!(data.settings.site_permissions.is_empty());
@@ -288,6 +314,7 @@ mod tests {
             workspace: 1,
             pinned: false,
             keep_awake: true,
+            custom_title: Some("Development".into()),
         });
         let restored: BrowserData =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
@@ -297,6 +324,10 @@ mod tests {
         );
         assert!(restored.workspaces[0].project.split);
         assert!(restored.session_tabs[0].keep_awake);
+        assert_eq!(
+            restored.session_tabs[0].custom_title.as_deref(),
+            Some("Development")
+        );
     }
 
     #[test]
@@ -372,7 +403,7 @@ mod tests {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub search_engine: String,
@@ -396,7 +427,7 @@ impl Default for Settings {
         }
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Download {
     pub id: String,
     pub url: String,

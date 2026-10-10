@@ -121,11 +121,14 @@ pub(crate) fn run() {
                     }
                     if let Some(data) = windows
                         .get(&key)
+                        .filter(|_| windows.len() > 1)
                         .filter(|b| !b.private_mode)
                         .map(|b| b.data.clone())
                     {
-                        for browser in windows.values_mut() {
-                            browser.sync_data(&data);
+                        for (other_key, browser) in &mut windows {
+                            if *other_key != key {
+                                browser.sync_data(&data);
+                            }
                         }
                     }
                 }
@@ -171,9 +174,13 @@ pub(crate) fn run() {
                 }
                 browser.window.set_focus();
                 focused = key;
-                let data = browser.data.clone();
-                for browser in windows.values_mut() {
-                    browser.sync_data(&data);
+                if windows.len() > 1 {
+                    let data = windows[&key].data.clone();
+                    for (other_key, browser) in &mut windows {
+                        if *other_key != key {
+                            browser.sync_data(&data);
+                        }
+                    }
                 }
             }
         }

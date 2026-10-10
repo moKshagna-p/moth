@@ -65,6 +65,27 @@ import XCTest
         XCTAssertEqual(evaluate(PictureInPicture.stateScript, in: view) as? Bool, true)
     }
 
+
+    func testMusicBadgeRequiresUnmutedPlaybackOrExplicitMediaSession() {
+        let view = fixture()
+        func playing() -> Bool? { (evaluate(PictureInPicture.mediaStateScript, in: view) as? [String: Bool])?["playing"] }
+        XCTAssertEqual(playing(), false)
+        _ = evaluate("Object.defineProperty(small, 'paused', {value: false, configurable: true}); small.muted = true; navigator.mediaSession.playbackState = 'playing'; true", in: view)
+        XCTAssertEqual(playing(), false)
+        _ = evaluate("small.muted = false; small.volume = 0; true", in: view)
+        XCTAssertEqual(playing(), false)
+        _ = evaluate("small.volume = 1; true", in: view)
+        XCTAssertEqual(playing(), true)
+        _ = evaluate("document.body.replaceChildren(); navigator.mediaSession.playbackState = 'none'; true", in: view)
+        XCTAssertEqual(playing(), false)
+        _ = evaluate("const audio = document.createElement('audio'); document.body.append(audio); Object.defineProperty(audio, 'paused', {value:false}); true", in: view)
+        XCTAssertEqual(playing(), true)
+        _ = evaluate("const host = document.createElement('div'); document.body.append(host); host.attachShadow({mode:'open'}).append(audio); true", in: view)
+        XCTAssertEqual(playing(), true)
+        _ = evaluate("document.body.replaceChildren(); navigator.mediaSession.playbackState = 'playing'; true", in: view)
+        XCTAssertEqual(playing(), true)
+    }
+
     func testAutomaticEntryRequiresPlayingVisibleVideoAndPreservesManualPlayer() {
         let view = fixture()
         XCTAssertEqual(evaluate(PictureInPicture.automaticEntryScript, in: view) as? String, "unavailable")
