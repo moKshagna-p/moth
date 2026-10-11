@@ -85,7 +85,8 @@ struct ChromeSnapshot: Decodable {
     @Published var paletteMode: PaletteMode?
     @Published var projectsVisible = false
     @Published var paletteFocus = 0
-    @Published var paletteQuery = "" { didSet { rebuildPalette(reset: true) } }
+    @Published var paletteQuery = "" { didSet { paletteCompletedSearchURL = nil; rebuildPalette(reset: true) } }
+    private(set) var paletteCompletedSearchURL: String?
     @Published var paletteResults: [PaletteResult] = []
     @Published var paletteSelection = 0
     @Published var renamingWorkspace = false
@@ -234,10 +235,21 @@ struct ChromeSnapshot: Decodable {
         guard !paletteResults.isEmpty else { return }
         paletteSelection = (paletteSelection + direction + paletteResults.count) % paletteResults.count
     }
+    @discardableResult func completePalette() -> Bool {
+        guard paletteMode == .newTab else { return false }
+        let selected = paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection] : nil
+        guard let suggestion = selected?.completion != nil ? selected : (paletteSelection == 0 ? paletteResults.first(where: { $0.completion != nil }) : nil),
+              let term = suggestion.completion else { return false }
+        paletteQuery = term
+        paletteCompletedSearchURL = suggestion.values["value"] as? String
+        return true
+    }
     func submitPalette(_ result: PaletteResult? = nil) {
         guard let item = result ?? (paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection] : nil) else { return }
+        var values = item.values
+        if item.id == "navigate", let searchURL = paletteCompletedSearchURL { values["value"] = searchURL }
         closePalette()
-        send(item.command, item.values)
+        send(item.command, values)
     }
     func choosePhoto() {
         let picker = NSOpenPanel()
@@ -913,7 +925,7 @@ private struct CommandPalette: View {
                                         }
                                     }
                                     Spacer(minLength: 8)
-                                    Text(index == model.paletteSelection ? "↵" : result.shortcut)
+                                    Text(index == model.paletteSelection ? "↵" : (result.completion != nil ? "⇥" : result.shortcut))
                                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                                 }.padding(.horizontal, 12).frame(height: 44).contentShape(Rectangle())
                                     .background(index == model.paletteSelection ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 10))
@@ -926,8 +938,13 @@ private struct CommandPalette: View {
                         if model.paletteResults.indices.contains(index) { proxy.scrollTo(model.paletteResults[index].id) }
                     }
             }
+            if model.paletteResults.contains(where: { $0.completion != nil }) {
+                Text("↑↓ Choose   ⇥ Complete   ↵ Open")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 22).padding(.bottom, 12)
+            }
         }
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 18))
         .onExitCommand { model.closePalette() }
     }
 }

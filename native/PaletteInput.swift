@@ -87,6 +87,7 @@ struct PaletteInput: NSViewRepresentable {
             case #selector(NSResponder.cancelOperation(_:)): model.closePalette()
             case #selector(NSResponder.moveUp(_:)): model.movePalette(-1)
             case #selector(NSResponder.moveDown(_:)): model.movePalette(1)
+            case #selector(NSResponder.insertTab(_:)): return model.completePalette()
             case #selector(NSResponder.complete(_:)): break
             default: return false
             }

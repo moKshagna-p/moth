@@ -17,6 +17,7 @@ fn main() {
         ])
         .arg("native/Chrome.swift")
         .arg("native/PaletteInput.swift")
+        .arg("native/SearchSuggestions.swift")
         .arg("native/BrowserFeatures.swift")
         .arg("native/DeveloperTools.swift")
         .arg("native/AdBlocker.swift")
@@ -39,6 +40,7 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     println!("cargo:rerun-if-changed=native/Chrome.swift");
     println!("cargo:rerun-if-changed=native/PaletteInput.swift");
+    println!("cargo:rerun-if-changed=native/SearchSuggestions.swift");
     println!("cargo:rerun-if-changed=native/BrowserFeatures.swift");
     println!("cargo:rerun-if-changed=native/DeveloperTools.swift");
     println!("cargo:rerun-if-changed=native/AdBlocker.swift");
