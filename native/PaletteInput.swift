@@ -76,7 +76,7 @@ struct PaletteInput: NSViewRepresentable {
 
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
-            model.paletteQuery = field.stringValue
+            model.setPaletteInput(field.stringValue, composing: (field.currentEditor() as? NSTextView)?.hasMarkedText() == true)
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {

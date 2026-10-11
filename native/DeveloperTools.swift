@@ -49,7 +49,7 @@ enum PaletteSearch {
         }
         return max(1, 300 - gaps)
     }
-    static func results(snapshot: ChromeSnapshot, query: String, newTab: Bool) -> [PaletteResult] {
+    static func results(snapshot: ChromeSnapshot, query: String, newTab: Bool, remoteSuggestions: [String] = []) -> [PaletteResult] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var candidates = snapshot.tabs.map { tab in
             PaletteResult(id: "tab:\(tab.id)", title: tab.title.isEmpty ? "New Tab" : tab.title,
@@ -104,7 +104,7 @@ enum PaletteSearch {
         }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 > $1.0 }.prefix(30).map { $0.2 }
         if newTab {
             let suggestions = SearchSuggestions.results(query: query, history: snapshot.history,
-                engine: snapshot.settings.search_engine, privateMode: snapshot.private_mode)
+                engine: snapshot.settings.search_engine, privateMode: snapshot.private_mode, remote: remoteSuggestions)
             let terms = Set(suggestions.compactMap(\.completion).map(SearchSuggestions.normalized))
             result.removeAll { item in
                 guard item.id.hasPrefix("saved:"), let url = item.values["value"] as? String,
