@@ -76,7 +76,7 @@ struct PaletteInput: NSViewRepresentable {
 
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
-            model.paletteQuery = field.stringValue
+            model.setPaletteInput(field.stringValue, composing: (field.currentEditor() as? NSTextView)?.hasMarkedText() == true)
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -87,6 +87,7 @@ struct PaletteInput: NSViewRepresentable {
             case #selector(NSResponder.cancelOperation(_:)): model.closePalette()
             case #selector(NSResponder.moveUp(_:)): model.movePalette(-1)
             case #selector(NSResponder.moveDown(_:)): model.movePalette(1)
+            case #selector(NSResponder.insertTab(_:)): return model.completePalette()
             case #selector(NSResponder.complete(_:)): break
             default: return false
             }

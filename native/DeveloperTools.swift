@@ -27,6 +27,7 @@ struct PaletteResult: Identifiable {
     let symbol: String
     var favicon: String? = nil
     var shortcut = ""
+    var completion: String? = nil
     let command: String
     var values: [String: Any] = [:]
 }
@@ -48,7 +49,7 @@ enum PaletteSearch {
         }
         return max(1, 300 - gaps)
     }
-    static func results(snapshot: ChromeSnapshot, query: String, newTab: Bool) -> [PaletteResult] {
+    static func results(snapshot: ChromeSnapshot, query: String, newTab: Bool, remoteSuggestions: [String] = []) -> [PaletteResult] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var candidates = snapshot.tabs.map { tab in
             PaletteResult(id: "tab:\(tab.id)", title: tab.title.isEmpty ? "New Tab" : tab.title,
@@ -101,6 +102,17 @@ enum PaletteSearch {
             guard let score = score(query, in: item.title + " " + item.subtitle) else { return nil }
             return (score, index, item)
         }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 > $1.0 }.prefix(30).map { $0.2 }
+        if newTab {
+            let suggestions = SearchSuggestions.results(query: query, history: snapshot.history,
+                engine: snapshot.settings.search_engine, privateMode: snapshot.private_mode, remote: remoteSuggestions)
+            let terms = Set(suggestions.compactMap(\.completion).map(SearchSuggestions.normalized))
+            result.removeAll { item in
+                guard item.id.hasPrefix("saved:"), let url = item.values["value"] as? String,
+                      let term = SearchSuggestions.searchTerm(in: url) else { return false }
+                return terms.contains(SearchSuggestions.normalized(term))
+            }
+            result.insert(contentsOf: suggestions, at: 0)
+        }
         if newTab || !query.isEmpty && result.isEmpty {
             result.insert(PaletteResult(id: "navigate", title: query.isEmpty ? "New Tab" : "Open “\(query)”", subtitle: "", symbol: "plus", command: query.isEmpty ? "open_blank_tab" : "open_new_tab", values: query.isEmpty ? [:] : ["value": query]), at: 0)
         }

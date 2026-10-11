@@ -68,7 +68,14 @@ struct ChromeSnapshot: Decodable {
 }
 
 @MainActor final class ChromeModel: ObservableObject {
-    @Published var snapshot: ChromeSnapshot?
+    @Published var snapshot: ChromeSnapshot? {
+        didSet {
+            if oldValue?.private_mode != snapshot?.private_mode || oldValue?.settings.search_engine != snapshot?.settings.search_engine {
+                paletteCompletedSearchURL = nil
+                refreshLiveSuggestions()
+            }
+        }
+    }
     @Published var swipeWorkspaces = UserDefaults.standard.object(forKey: "swipeWorkspaces") as? Bool ?? true {
         didSet { UserDefaults.standard.set(swipeWorkspaces, forKey: "swipeWorkspaces") }
     }
@@ -82,10 +89,33 @@ struct ChromeSnapshot: Decodable {
     @Published var sidebarWidth: CGFloat = 220
     @Published var address = ""
     @Published var addressFocus = 0
-    @Published var paletteMode: PaletteMode?
+    @Published var paletteMode: PaletteMode? { didSet { refreshLiveSuggestions() } }
     @Published var projectsVisible = false
     @Published var paletteFocus = 0
-    @Published var paletteQuery = "" { didSet { rebuildPalette(reset: true) } }
+    @Published var paletteQuery = "" {
+        didSet {
+            paletteCompletedSearchURL = nil
+            refreshLiveSuggestions()
+            rebuildPalette(reset: true)
+        }
+    }
+    private var paletteComposing = false
+    private var remoteSuggestions: [String] = []
+    private let suggestionDelay: UInt64
+    private let suggestionFetch: LiveSearchSuggestions.Fetch
+    private lazy var liveSuggestions = LiveSearchSuggestions(delay: suggestionDelay, fetch: suggestionFetch) { [weak self] terms in
+        self?.remoteSuggestions = terms
+        self?.rebuildPalette(reset: false)
+    }
+    func setPaletteInput(_ text: String, composing: Bool) {
+        paletteComposing = composing
+        paletteQuery = text
+    }
+    private func refreshLiveSuggestions() {
+        liveSuggestions.update(query: paletteQuery, engine: snapshot?.settings.search_engine ?? "google",
+            enabled: paletteMode == .newTab && snapshot != nil && snapshot?.private_mode == false && !paletteComposing)
+    }
+    private(set) var paletteCompletedSearchURL: String?
     @Published var paletteResults: [PaletteResult] = []
     @Published var paletteSelection = 0
     @Published var renamingWorkspace = false
@@ -94,7 +124,10 @@ struct ChromeSnapshot: Decodable {
     @Published var chromeScheme: ColorScheme = .light
     private var appearanceObservation: NSKeyValueObservation?
 
-    init() {
+    init(suggestionDelay: UInt64 = 250_000_000,
+         suggestionFetch: @escaping LiveSearchSuggestions.Fetch = { try await SearchSuggestions.fetch(query: $0, engine: $1) }) {
+        self.suggestionDelay = suggestionDelay
+        self.suggestionFetch = suggestionFetch
         appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             DispatchQueue.main.async {
                 self?.updateContrast()
@@ -213,6 +246,7 @@ struct ChromeSnapshot: Decodable {
     func showNewTab() { showPalette(.newTab) }
     func showPalette(_ mode: PaletteMode) {
         projectsVisible = false
+        paletteComposing = false
         paletteQuery = ""
         paletteMode = mode
         rebuildPalette(reset: true)
@@ -227,17 +261,28 @@ struct ChromeSnapshot: Decodable {
     func rebuildPalette(reset: Bool) {
         guard let snapshot else { return }
         let selectedID = paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection].id : nil
-        paletteResults = PaletteSearch.results(snapshot: snapshot, query: paletteQuery, newTab: paletteMode == .newTab)
+        paletteResults = PaletteSearch.results(snapshot: snapshot, query: paletteQuery, newTab: paletteMode == .newTab, remoteSuggestions: remoteSuggestions)
         paletteSelection = reset ? 0 : (paletteResults.firstIndex { $0.id == selectedID } ?? 0)
     }
     func movePalette(_ direction: Int) {
         guard !paletteResults.isEmpty else { return }
         paletteSelection = (paletteSelection + direction + paletteResults.count) % paletteResults.count
     }
+    @discardableResult func completePalette() -> Bool {
+        guard paletteMode == .newTab else { return false }
+        let selected = paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection] : nil
+        guard let suggestion = selected?.completion != nil ? selected : (paletteSelection == 0 ? paletteResults.first(where: { $0.completion != nil }) : nil),
+              let term = suggestion.completion else { return false }
+        paletteQuery = term
+        paletteCompletedSearchURL = suggestion.values["value"] as? String
+        return true
+    }
     func submitPalette(_ result: PaletteResult? = nil) {
         guard let item = result ?? (paletteResults.indices.contains(paletteSelection) ? paletteResults[paletteSelection] : nil) else { return }
+        var values = item.values
+        if item.id == "navigate", let searchURL = paletteCompletedSearchURL { values["value"] = searchURL }
         closePalette()
-        send(item.command, item.values)
+        send(item.command, values)
     }
     func choosePhoto() {
         let picker = NSOpenPanel()
@@ -913,7 +958,7 @@ private struct CommandPalette: View {
                                         }
                                     }
                                     Spacer(minLength: 8)
-                                    Text(index == model.paletteSelection ? "↵" : result.shortcut)
+                                    Text(index == model.paletteSelection ? "↵" : (result.completion != nil ? "⇥" : result.shortcut))
                                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                                 }.padding(.horizontal, 12).frame(height: 44).contentShape(Rectangle())
                                     .background(index == model.paletteSelection ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 10))
@@ -926,8 +971,13 @@ private struct CommandPalette: View {
                         if model.paletteResults.indices.contains(index) { proxy.scrollTo(model.paletteResults[index].id) }
                     }
             }
+            if model.paletteResults.contains(where: { $0.completion != nil }) {
+                Text("↑↓ Choose   ⇥ Complete   ↵ Open")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 22).padding(.bottom, 12)
+            }
         }
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 18))
         .onExitCommand { model.closePalette() }
     }
 }
