@@ -56,7 +56,7 @@ struct BrowserSettings: Codable {
             }.disabled(isPrivate)
             Section("Privacy") {
                 Toggle("Block ads", isOn: $settings.ad_blocking).disabled(isPrivate)
-                Text("Built-in filters block common third-party ad networks. Use the toolbar shield to pause for a website. Filters stay on your Mac.").font(.caption)
+                Text("Built-in filters block common ad networks and skip detected YouTube player ads. Use the toolbar shield to pause for a website. Filters stay on your Mac.").font(.caption)
                 if !settings.ad_block_exceptions.isEmpty {
                     Text("Paused on " + settings.ad_block_exceptions.joined(separator: ", ")).font(.caption).lineLimit(2)
                     Button("Reset ad blocking exceptions") { settings.ad_block_exceptions = [] }.disabled(isPrivate)
@@ -309,6 +309,11 @@ struct BrowserSettings: Codable {
 
 @MainActor final class PageContainer: NSView {
     var acceptsInteraction = true
+    var onResize: (() -> Void)?
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        onResize?()
+    }
     override func hitTest(_ point: NSPoint) -> NSView? {
         acceptsInteraction ? super.hitTest(point) : nil
     }
@@ -316,9 +321,13 @@ struct BrowserSettings: Codable {
 
 // Forward callbacks not handled here to Wry, preserving its navigation and file dialogs.
 @MainActor final class PageDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
-    let window: UInt64
-    let id: UInt64
-    let generation: UInt64
+    var window: UInt64
+    var id: UInt64
+    var generation: UInt64
+    var adopted = false
+    var requestedZoom: CGFloat = 1
+    var fitToWindow = false
+    var nativeObservations: [NSKeyValueObservation] = []
     weak var webView: WKWebView?
     // WebKit docks its inspector against the inspected view's superview.
     // A pane-sized parent keeps those layout changes inside the pane.
@@ -336,6 +345,7 @@ struct BrowserSettings: Codable {
     var mediaSuspended = false
     var adPreferences = AdBlockPreferences()
     var installedAdRules: WKContentRuleList?
+    private var installedYouTubePreferences: AdBlockPreferences?
     var popups: [UUID: BrowserPopup] = [:]
     weak var popup: BrowserPopup?
     init(window: UInt64, id: UInt64, generation: UInt64, webView: WKWebView, uiDelegate: WKUIDelegate? = nil) {
@@ -355,6 +365,9 @@ struct BrowserSettings: Codable {
             webView.autoresizingMask = [.width, .height]
         }
         super.init()
+        container.onResize = { [weak self] in self?.updatePageZoom() }
+        // WebKit supplies the interactive trackpad transition and history snapshots.
+        webView.allowsBackForwardNavigationGestures = true
         windowFocused = webView.window?.isKeyWindow ?? true
         // Native notifications also cover switching to another app or macOS Space.
         NotificationCenter.default.addObserver(self, selector: #selector(windowFocusChanged(_:)), name: NSWindow.didBecomeKeyNotification, object: nil)
@@ -368,6 +381,13 @@ struct BrowserSettings: Codable {
     deinit {
         NotificationCenter.default.removeObserver(self)
         if let focusObserver { NSEvent.removeMonitor(focusObserver) }
+    }
+    func updatePageZoom() {
+        guard let view = webView else { return }
+        // Desktop sites can keep fixed-width panels even after a viewport resize.
+        // This opt-in mode gives them a desktop viewport while fitting the pane.
+        let scale = requestedZoom * (fitToWindow ? min(1, max(1, container.bounds.width) / 1024) : 1)
+        if abs(view.pageZoom - scale) > 0.0001 { view.pageZoom = scale }
     }
     @objc private func windowFocusChanged(_ notification: Notification) {
         guard let source = notification.object as? NSWindow, source === webView?.window else { return }
@@ -388,6 +408,7 @@ struct BrowserSettings: Codable {
         mediaRevision &+= 1
         checkingMedia = false
         applyMediaState(playing: false, pip: false)
+        if adopted { sendNativeEvent("started", webView.url?.absoluteString ?? "about:blank") }
         self.navigation?.webView?(webView, didStartProvisionalNavigation: navigation)
     }
     func updateMediaState() {
@@ -476,6 +497,10 @@ struct BrowserSettings: Codable {
                     if let list { controller.add(list) }
                     self.installedAdRules = list
                 }
+                if self.installedYouTubePreferences != requested {
+                    YouTubeAdBlocking.install(on: view, preferences: requested)
+                    self.installedYouTubePreferences = requested
+                }
                 completion(true)
             case .failure:
                 completion(false)
@@ -535,7 +560,31 @@ struct BrowserSettings: Codable {
         // the URL ourselves would lose POST bodies and the JavaScript opener.
         return popup.webView
     }
-    func webViewDidClose(_ webView: WKWebView) { popup?.close() }
+    func webViewDidClose(_ webView: WKWebView) {
+        if adopted { model?.send("close_tab", ["id": id]) }
+        else { popup?.close() }
+    }
+    func sendNativeEvent(_ event: String, _ value: String) {
+        model?.send("native_page_event", ["id": id, "generation": generation, "event": event, "value": value])
+    }
+    func observeAdoptedPage() {
+        guard let webView else { return }
+        nativeObservations = [
+            webView.observe(\.title, options: [.new]) { [weak self] view, _ in
+                MainActor.assumeIsolated { self?.sendNativeEvent("title", view.title ?? "") }
+            },
+            webView.observe(\.url, options: [.new]) { [weak self] view, _ in
+                MainActor.assumeIsolated {
+                    guard let self, !view.isLoading else { return }
+                    self.sendNativeEvent("finished", view.url?.absoluteString ?? "about:blank")
+                }
+            }
+        ]
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if adopted { sendNativeEvent("finished", webView.url?.absoluteString ?? "about:blank") }
+        self.navigation?.webView?(webView, didFinish: navigation)
+    }
     func report(_ error: Error) {
         let failure = error as NSError
         // WebKit interrupts navigation when a response becomes a download.
@@ -641,6 +690,15 @@ func moth_page_layout(_ window: UInt64, _ id: UInt64, _ x: Double, _ y: Double, 
 @_cdecl("moth_page_visible")
 func moth_page_visible(_ window: UInt64, _ id: UInt64, _ visible: Bool) {
     MainActor.assumeIsolated { BrowserFeatures.pages["\(window):\(id)"]?.setVisible(visible) }
+}
+@_cdecl("moth_page_zoom")
+func moth_page_zoom(_ window: UInt64, _ id: UInt64, _ zoom: Double, _ fit: Bool) {
+    guard zoom.isFinite, zoom >= 0.25, zoom <= 3 else { return }
+    MainActor.assumeIsolated {
+        guard let page = BrowserFeatures.pages["\(window):\(id)"] else { return }
+        page.requestedZoom = zoom; page.fitToWindow = fit
+        page.updatePageZoom()
+    }
 }
 @_cdecl("moth_page_action")
 func moth_page_action(_ window: UInt64, _ id: UInt64, _ action: UnsafePointer<CChar>?) {

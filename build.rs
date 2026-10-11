@@ -19,6 +19,7 @@ fn main() {
         .arg("native/BrowserFeatures.swift")
         .arg("native/DeveloperTools.swift")
         .arg("native/AdBlocker.swift")
+        .arg("native/YouTubeAdBlocking.swift")
         .arg("native/PictureInPicture.swift")
         .arg("native/BrowserPopup.swift")
         .arg("native/LocalProject.swift")
@@ -39,6 +40,7 @@ fn main() {
     println!("cargo:rerun-if-changed=native/BrowserFeatures.swift");
     println!("cargo:rerun-if-changed=native/DeveloperTools.swift");
     println!("cargo:rerun-if-changed=native/AdBlocker.swift");
+    println!("cargo:rerun-if-changed=native/YouTubeAdBlocking.swift");
     println!("cargo:rerun-if-changed=native/PictureInPicture.swift");
     println!("cargo:rerun-if-changed=native/BrowserPopup.swift");
     println!("cargo:rerun-if-changed=native/LocalProject.swift");
