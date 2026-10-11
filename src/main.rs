@@ -6,6 +6,7 @@ mod downloads;
 mod favicon;
 #[cfg(target_os = "macos")]
 mod native_chrome;
+mod page_view;
 mod protocol;
 
 fn main() {

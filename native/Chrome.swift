@@ -30,6 +30,7 @@ struct TabInfo: Decodable, Identifiable {
     let picture_in_picture: Bool?
     let media_suspended: Bool
     let zoom: Double
+    let fit_to_window: Bool?
     let page_error: String?
     let viewport: [UInt16]?
     let workspace: UInt64
@@ -575,7 +576,7 @@ private struct TabRow: View {
             .help(tab.sleeping ? "Sleeping tab — reloads when opened" : tab.url)
             .overlay(alignment: .trailing) {
                 Button { model.send("close_tab", ["id": tab.id]) } label: {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                    Image(systemName: tab.pinned ? "minus" : "xmark").font(.system(size: 9, weight: .bold))
                         .foregroundStyle(model.chromeMuted)
                         .frame(width: 20, height: 20)
                         .background(hovering || selected ? Color.white.opacity(0.16) : .clear, in: Circle())
@@ -584,8 +585,8 @@ private struct TabRow: View {
                 .buttonStyle(.plain)
                 .opacity(selected || hovering ? 1 : 0)
                 .allowsHitTesting(selected || hovering)
-                .help("Close Tab")
-                .accessibilityLabel("Close " + tab.title)
+                .help(tab.pinned ? "Close Page · Keep Pinned Tab" : "Close Tab")
+                .accessibilityLabel((tab.pinned ? "Close page, keep pinned tab " : "Close ") + tab.title)
                 .padding(.trailing, 6)
             }
         }
@@ -840,6 +841,11 @@ private struct BrowserMenu: View {
             if model.snapshot?.private_mode == true { Text("Private Window — browsing is not saved") }
             Button("Quick Switch…    ⌘K") { model.showSwitcher() }
             Button("Find in Page…    ⌘F") { model.send("find") }
+            Toggle("Fit to Window", isOn: Binding(
+                get: { model.activeTab?.fit_to_window == true },
+                set: { _ in model.send("toggle_fit_page") }
+            ))
+            .disabled(model.activeTab == nil || model.activeTab?.url == "about:blank")
             Button(model.activeTab?.picture_in_picture == true ? "Exit Picture in Picture" : "Picture in Picture") {
                 model.send("picture_in_picture")
             }

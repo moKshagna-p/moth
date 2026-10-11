@@ -5,6 +5,16 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Command {
+    MergePopup {
+        popup: String,
+        workspace: u64,
+    },
+    NativePageEvent {
+        id: u64,
+        generation: u64,
+        event: String,
+        value: String,
+    },
     Navigate {
         value: String,
     },
@@ -53,6 +63,7 @@ pub(crate) enum Command {
     Zoom {
         delta: i8,
     },
+    ToggleFitPage,
     Print,
     Settings,
     SetSettings {

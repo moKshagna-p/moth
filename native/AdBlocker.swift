@@ -14,7 +14,7 @@ struct AdBlockPreferences: Hashable {
     }
 }
 
-// Declarative WebKit filters run in its network engine; no injected request observers.
+// Declarative network filters are complemented by isolated YouTube DOM handling.
 @MainActor final class AdBlocker: ObservableObject {
     static let shared = AdBlocker()
     @Published private(set) var failure: String?
@@ -100,7 +100,7 @@ struct AdBlockPreferences: Hashable {
         if !settings.ad_blocking { return "Ad blocking off" }
         if AdBlockPreferences.isLocal(host) { return "Ad blocking paused for local development" }
         if host == nil { return "Ad blocking enabled" }
-        return active ? "Blocking common ad networks" : "Ad blocking paused on this website"
+        return active ? "Blocking ads" : "Ad blocking paused on this website"
     }
     var body: some View {
         Menu {

@@ -63,7 +63,7 @@ fn host_label(url: &str) -> String {
 struct Tab {
     id: u64,
     workspace: u64,
-    view: Option<WebView>,
+    view: Option<crate::page_view::PageView>,
     visible: bool,
     generation: u64,
     last_used: Instant,
@@ -77,6 +77,7 @@ struct Tab {
     site_color: Option<[u8; 3]>,
     pinned: bool,
     zoom: f64,
+    fit_to_window: bool,
     keep_awake: bool,
     playing: bool,
     picture_in_picture: bool,
@@ -103,6 +104,44 @@ impl Tab {
             custom_title: self.custom_title.clone(),
         }
     }
+}
+
+// A pin is a persistent entry; closing it releases only its live page.
+fn close_tab_entry(tabs: &mut Vec<Tab>, index: usize) -> Option<SessionTab> {
+    if tabs[index].pinned {
+        let tab = &mut tabs[index];
+        tab.view = None;
+        tab.generation += 1;
+        tab.visible = false;
+        tab.loading = false;
+        tab.playing = false;
+        tab.picture_in_picture = false;
+        tab.media_suspended = false;
+        tab.page_error = None;
+        tab.bounds = None;
+        None
+    } else {
+        let tab = tabs.remove(index);
+        (tab.url != "about:blank").then(|| tab.session())
+    }
+}
+
+fn next_tab_after_close(tabs: &[Tab], index: usize, closed: u64, workspace: u64) -> Option<u64> {
+    let start = index.min(tabs.len());
+    tabs[start..]
+        .iter()
+        .chain(tabs[..start].iter())
+        .find(|tab| {
+            tab.id != closed && tab.workspace == workspace && (!tab.pinned || tab.view.is_some())
+        })
+        .map(|tab| tab.id)
+}
+
+fn tab_for_workspace(tabs: &[Tab], workspace: u64) -> Option<u64> {
+    tabs.iter()
+        // Closed pins remain in the sidebar, but only an explicit click should reopen them.
+        .find(|tab| tab.workspace == workspace && (!tab.pinned || tab.view.is_some()))
+        .map(|tab| tab.id)
 }
 
 fn reorder_tabs(tabs: &mut Vec<Tab>, id: u64, before: u64) {
@@ -156,6 +195,7 @@ struct TabState<'a> {
     picture_in_picture: bool,
     media_suspended: bool,
     zoom: f64,
+    fit_to_window: bool,
     page_error: Option<&'a str>,
     viewport: Option<(u16, u16)>,
 }
@@ -374,7 +414,7 @@ impl Browser {
         let show_shell_page = self.panel.is_some()
             || self
                 .active_tab()
-                .is_some_and(|tab| tab.url == "about:blank");
+                .is_some_and(|tab| tab.url == "about:blank" && tab.view.is_none());
         let (content_width, content_height) = content_size(size, self.data.sidebar_width as f64);
         if self.last_size != Some((size.width, size.height)) {
             let bounds = rect(
@@ -407,6 +447,8 @@ impl Browser {
                         self.split_ratio,
                         tab.viewport,
                     );
+                    #[cfg(target_os = "macos")]
+                    crate::native_chrome::page_zoom(self.key, tab.id, tab.zoom, tab.fit_to_window);
                     if tab.bounds != Some(bounds) {
                         #[cfg(target_os = "macos")]
                         crate::native_chrome::page_layout(self.key, tab.id, bounds);
@@ -458,6 +500,7 @@ impl Browser {
             site_color: None,
             pinned: false,
             zoom: 1.0,
+            fit_to_window: false,
             keep_awake: false,
             playing: false,
             picture_in_picture: false,
@@ -472,6 +515,63 @@ impl Browser {
         self.resize();
         self.reap_tabs();
         self.refresh();
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn merge_popup(&mut self, popup: &str, workspace: u64) -> wry::Result<()> {
+        if !self.data.workspaces.iter().any(|item| item.id == workspace) {
+            return Ok(());
+        }
+        let id = self.next_tab_id;
+        if !crate::native_chrome::merge_popup(self.key, popup, id, 1) {
+            return Ok(());
+        }
+        // Add a tab without navigating: the native view and its document already exist.
+        self.next_tab_id += 1;
+        let url = crate::native_chrome::page_operation(self.key, id, "url", "")
+            .unwrap_or_else(|| "about:blank".into());
+        let title = crate::native_chrome::page_operation(self.key, id, "title", "")
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| host_label(&url));
+        let loading = crate::native_chrome::page_operation(self.key, id, "loading", "").as_deref()
+            == Some("true");
+        self.tabs.push(Tab {
+            id,
+            workspace,
+            view: Some(crate::page_view::PageView::Adopted {
+                window: self.key,
+                id,
+            }),
+            visible: false,
+            generation: 1,
+            last_used: Instant::now(),
+            activations: 0,
+            favicon: crate::favicon::fallback(&url),
+            url,
+            title,
+            custom_title: None,
+            loading,
+            load_revision: 0,
+            site_color: None,
+            pinned: false,
+            zoom: crate::native_chrome::page_operation(self.key, id, "zoom_value", "")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1.0),
+            fit_to_window: crate::native_chrome::page_operation(self.key, id, "fit_to_window", "")
+                .as_deref()
+                == Some("true"),
+            keep_awake: false,
+            playing: false,
+            picture_in_picture: false,
+            media_suspended: false,
+            page_error: None,
+            viewport: None,
+            bounds: None,
+        });
+        self.activate_tab(id)?;
+        self.request_favicon(id, 1);
+        self.window.set_focus();
         Ok(())
     }
 
@@ -505,6 +605,7 @@ impl Browser {
             site_color: None,
             pinned: session.pinned,
             zoom: 1.0,
+            fit_to_window: false,
             keep_awake: session.keep_awake,
             playing: false,
             picture_in_picture: false,
@@ -546,7 +647,12 @@ impl Browser {
         );
     }
 
-    fn build_view(&self, id: u64, generation: u64, url: &str) -> wry::Result<WebView> {
+    fn build_view(
+        &self,
+        id: u64,
+        generation: u64,
+        url: &str,
+    ) -> wry::Result<crate::page_view::PageView> {
         let size = self.size();
         let load_proxy = self.proxy.clone();
         let title_proxy = self.proxy.clone();
@@ -622,7 +728,7 @@ impl Browser {
             // Install the navigation gate before the first request, including restored/private tabs.
             view.load_url(url)?;
         }
-        Ok(view)
+        Ok(view.into())
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -832,36 +938,24 @@ impl Browser {
     }
 
     fn close_tab(&mut self, id: u64) {
-        if self.split == Some(id) {
-            self.split = None;
-        }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
         let was_active = self.active == id;
-        let tab = self.tabs.remove(index);
-        if tab.url != "about:blank" {
-            self.closed_tabs.push(tab.session());
+        if self.split == Some(id) || was_active {
+            self.split = None;
+        }
+        if let Some(session) = close_tab_entry(&mut self.tabs, index) {
+            self.closed_tabs.push(session);
             if self.closed_tabs.len() > 20 {
                 self.closed_tabs.remove(0);
             }
         }
-        if !self
-            .tabs
-            .iter()
-            .any(|tab| tab.workspace == self.active_workspace)
-        {
-            if let Err(error) = self.new_tab("about:blank") {
+        if was_active {
+            if let Some(next) = next_tab_after_close(&self.tabs, index, id, self.active_workspace) {
+                self.switch_tab(next);
+            } else if let Err(error) = self.new_tab("about:blank") {
                 eprintln!("Cannot open tab: {error}");
-            }
-        } else if was_active {
-            let next = self.tabs[index.min(self.tabs.len() - 1)..]
-                .iter()
-                .chain(self.tabs[..index.min(self.tabs.len())].iter())
-                .find(|tab| tab.workspace == self.active_workspace)
-                .map(|tab| tab.id);
-            if let Some(id) = next {
-                self.switch_tab(id);
             }
         } else {
             self.resize();
@@ -871,6 +965,27 @@ impl Browser {
 
     pub(crate) fn handle_command(&mut self, command: Command) {
         match command {
+            Command::MergePopup { popup, workspace } => {
+                #[cfg(target_os = "macos")]
+                if let Err(error) = self.merge_popup(&popup, workspace) {
+                    eprintln!("Cannot move window to workspace: {error}");
+                }
+            }
+            Command::NativePageEvent {
+                id,
+                generation,
+                event,
+                value,
+            } => {
+                let event = match event.as_str() {
+                    "started" => BrowserEvent::PageStarted(id, generation, value),
+                    "finished" => BrowserEvent::PageFinished(id, generation, value),
+                    "title" => BrowserEvent::TitleChanged(id, generation, value),
+                    _ => return,
+                };
+                self.handle_event(event);
+                return;
+            }
             Command::NewWindow { .. } => {} // Handled by the application window manager.
             Command::Inspect => {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) {
@@ -1035,6 +1150,13 @@ impl Browser {
                         let _ = view.zoom(tab.zoom);
                     }
                 }
+                self.resize();
+            }
+            Command::ToggleFitPage => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == self.active) {
+                    tab.fit_to_window = !tab.fit_to_window;
+                }
+                self.resize();
             }
             Command::Print => {
                 if let Some(view) = self.active_tab().and_then(|t| t.view.as_ref()) {
@@ -1344,12 +1466,7 @@ impl Browser {
             }
             Command::SwitchWorkspace { id } => {
                 if self.data.workspaces.iter().any(|space| space.id == id) {
-                    if let Some(tab_id) = self
-                        .tabs
-                        .iter()
-                        .find(|tab| tab.workspace == id)
-                        .map(|tab| tab.id)
-                    {
+                    if let Some(tab_id) = tab_for_workspace(&self.tabs, id) {
                         self.switch_tab(tab_id);
                     } else {
                         self.active_workspace = id;
@@ -1707,6 +1824,7 @@ impl Browser {
                     picture_in_picture: tab.picture_in_picture,
                     media_suspended: tab.media_suspended,
                     zoom: tab.zoom,
+                    fit_to_window: tab.fit_to_window,
                     page_error: tab.page_error.as_deref(),
                     viewport: tab.viewport,
                 })
@@ -1841,9 +1959,10 @@ fn valid_split(tabs: &[Tab], active: u64, split: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjacent_tab_index, content_size, eviction_score, host_label, page_bounds, photo_mime,
-        record_tab_switch, reload_needs_navigation, reorder_tabs, shortcut_tab_index, valid_split,
-        Tab, IDLE_TAB_AGE, TOOLBAR_HEIGHT,
+        adjacent_tab_index, close_tab_entry, content_size, eviction_score, host_label,
+        next_tab_after_close, page_bounds, photo_mime, record_tab_switch, reload_needs_navigation,
+        reorder_tabs, shortcut_tab_index, tab_for_workspace, valid_split, Tab, IDLE_TAB_AGE,
+        TOOLBAR_HEIGHT,
     };
     use std::time::{Duration, Instant};
     use tao::dpi::LogicalSize;
@@ -1866,6 +1985,7 @@ mod tests {
             site_color: None,
             pinned: false,
             zoom: 1.0,
+            fit_to_window: false,
             keep_awake: false,
             playing: false,
             picture_in_picture: false,
@@ -1874,6 +1994,81 @@ mod tests {
             viewport: None,
             bounds: None,
         }
+    }
+
+    #[test]
+    fn workspace_switch_does_not_reopen_closed_pins() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now), tab(3, now)];
+        tabs[0].pinned = true;
+        tabs[0].url = "https://example.com".into();
+        tabs[2].workspace = 2;
+        close_tab_entry(&mut tabs, 0);
+
+        assert_eq!(tab_for_workspace(&tabs, 2), Some(3));
+        assert_eq!(tab_for_workspace(&tabs, 1), Some(2));
+        // With only closed pins left, the caller should open a blank tab.
+        tabs.remove(1);
+        assert_eq!(tab_for_workspace(&tabs, 1), None);
+        assert_eq!(tabs[0].url, "https://example.com");
+        assert!(tabs[0].pinned && tabs[0].view.is_none());
+        assert_eq!(tab_for_workspace(&tabs, 99), None);
+    }
+
+    #[test]
+    fn closing_a_pin_keeps_its_session_and_clears_live_state() {
+        let mut pin = tab(1, Instant::now());
+        pin.pinned = true;
+        pin.url = "https://www.youtube.com/watch?v=example".into();
+        pin.rename("Videos");
+        pin.keep_awake = true;
+        pin.zoom = 1.25;
+        pin.loading = true;
+        pin.visible = true;
+        pin.playing = true;
+        pin.picture_in_picture = true;
+        pin.media_suspended = true;
+        pin.page_error = Some("Old error".into());
+        pin.bounds = Some((0., 0., 100., 100.));
+        let session = pin.session();
+        let mut tabs = vec![pin];
+        assert!(close_tab_entry(&mut tabs, 0).is_none());
+        assert_eq!(tabs.len(), 1);
+        let pin = &tabs[0];
+        assert!(pin.pinned && pin.keep_awake && pin.view.is_none());
+        assert_eq!(pin.session().url, session.url);
+        assert_eq!(pin.session().custom_title, session.custom_title);
+        assert_eq!(pin.zoom, 1.25);
+        assert_eq!(pin.generation, 1);
+        assert!(
+            !pin.visible
+                && !pin.loading
+                && !pin.playing
+                && !pin.picture_in_picture
+                && !pin.media_suspended
+        );
+        assert!(pin.bounds.is_none() && pin.page_error.is_none());
+        assert_eq!(next_tab_after_close(&tabs, 0, 1, 1), None);
+        // Closing the placeholder must not reopen the sleeping pin.
+        tabs.push(tab(2, Instant::now()));
+        assert!(close_tab_entry(&mut tabs, 1).is_none());
+        assert_eq!(next_tab_after_close(&tabs, 1, 2, 1), None);
+    }
+
+    #[test]
+    fn closing_regular_tabs_archives_and_selects_within_the_workspace() {
+        let now = Instant::now();
+        let mut tabs = vec![tab(1, now), tab(2, now), tab(3, now)];
+        tabs[0].url = "https://example.com".into();
+        tabs[1].workspace = 2;
+        assert_eq!(
+            close_tab_entry(&mut tabs, 0).unwrap().url,
+            "https://example.com"
+        );
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(next_tab_after_close(&tabs, 0, 1, 1), Some(3));
+        tabs[1].pinned = true;
+        assert_eq!(next_tab_after_close(&tabs, 0, 1, 1), None);
     }
 
     #[test]

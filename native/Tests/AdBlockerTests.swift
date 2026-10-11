@@ -18,6 +18,92 @@ import XCTest
         waitUntil { result != nil }
         return result!
     }
+    func testPagesEnableNativeAnimatedHistoryGestures() {
+        let view = WKWebView()
+        let page = PageDelegate(window: 989, id: 3, generation: 1, webView: view)
+        XCTAssertTrue(view.allowsBackForwardNavigationGestures)
+        withExtendedLifetime(page) {}
+    }
+
+    func testYouTubeAdsAreScopedAndRespectPreferences() throws {
+        _ = NSApplication.shared
+        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 400, height: 300), configuration: configuration)
+        let page = PageDelegate(window: 989, id: 4, generation: 1, webView: view)
+        view.navigationDelegate = page
+        let world = WKContentWorld.world(name: "Moth.YouTubeAds")
+        func evaluate(_ script: String, isolated: Bool = false) -> Any? {
+            var done = false, value: Any?
+            view.evaluateJavaScript(script, in: nil, in: isolated ? world : .page) { result in
+                switch result {
+                case .success(let result): value = result
+                case .failure(let error): XCTFail(error.localizedDescription)
+                }
+                done = true
+            }
+            waitUntil { done }
+            return value
+        }
+        func load(_ host: String, preferences: AdBlockPreferences = AdBlockPreferences()) {
+            page.adPreferences = preferences
+            var ready = false
+            page.prepareAdBlocking { success in XCTAssertTrue(success); ready = true }
+            waitUntil { ready }
+            view.loadSimulatedRequest(URLRequest(url: URL(string: "https://\(host)/watch?v=fixture")!), responseHTML: """
+                <html><body>
+                <ytd-ad-slot-renderer id='advert'>Sponsored</ytd-ad-slot-renderer>
+                <article id='content'>Normal content</article>
+                <div id='movie_player'><video></video>
+                <button class='ytp-skip-ad-button' style='display:none' onclick="this.dataset.clicked='yes'">Skip</button></div>
+                </body></html>
+                """)
+            waitUntil { !view.isLoading }
+        }
+        func display() -> String? {
+            evaluate("getComputedStyle(document.getElementById('advert')).display") as? String
+        }
+        load("www.youtube.com")
+        waitUntil { display() == "none" }
+        XCTAssertEqual(evaluate("getComputedStyle(document.getElementById('content')).display") as? String, "block")
+        // Stub only media properties in the isolated test world; no real network/media is needed.
+        _ = evaluate("""
+            var video = document.querySelector('video');
+            Object.defineProperty(video, 'duration', {value:30, configurable:true});
+            Object.defineProperty(video, 'currentTime', {value:7, writable:true, configurable:true});
+            video.playbackRate = 1.25; video.muted = false;
+            document.body.append(document.createElement('span')); true;
+            """, isolated: true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(evaluate("video.currentTime", isolated: true) as? Double, 7)
+        _ = evaluate("document.getElementById('movie_player').classList.add('ad-showing'); true")
+        waitUntil { (evaluate("video.currentTime", isolated: true) as? Double ?? 0) >= 29.9 }
+        XCTAssertEqual(evaluate("video.playbackRate", isolated: true) as? Double, 1.25)
+        XCTAssertEqual(evaluate("video.muted", isolated: true) as? Bool, false)
+        // Ads with unavailable durations still use YouTube's own Skip button.
+        _ = evaluate("Object.defineProperty(video, 'duration', {value:NaN, configurable:true}); true", isolated: true)
+        _ = evaluate("document.querySelector('button').style.display='block'; true")
+        waitUntil { evaluate("document.querySelector('button').dataset.clicked") as? String == "yes" }
+        _ = evaluate("document.getElementById('movie_player').classList.remove('ad-showing'); true")
+        _ = evaluate("video.currentTime=8; true", isolated: true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(evaluate("video.currentTime", isolated: true) as? Double, 8)
+        // Pausing restores already-loaded DOM, as well as subsequent documents.
+        page.adPreferences.enabled = false
+        var ready = false
+        page.prepareAdBlocking { success in XCTAssertTrue(success); ready = true }
+        waitUntil { ready && display() != "none" }
+        load("www.youtube.com", preferences: AdBlockPreferences(enabled: false))
+        XCTAssertFalse(display() == "none")
+        load("www.youtube.com", preferences: AdBlockPreferences(exceptions: ["www.youtube.com"]))
+        XCTAssertFalse(display() == "none")
+        load("m.youtube.com")
+        waitUntil { display() == "none" }
+        load("youtube.com.example.com")
+        XCTAssertFalse(display() == "none")
+        load("example.com")
+        XCTAssertFalse(display() == "none")
+    }
+
     func testDomainFiltersHaveHostBoundaries() throws {
         let pattern = try NSRegularExpression(pattern: AdBlocker.filter(for: "doubleclick.net"))
         func matches(_ value: String) -> Bool { pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil }

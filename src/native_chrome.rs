@@ -102,6 +102,7 @@ unsafe extern "C" {
     fn moth_page_action(window: u64, id: u64, action: *const c_char);
     fn moth_page_layout(window: u64, id: u64, x: f64, y: f64, width: f64, height: f64);
     fn moth_page_visible(window: u64, id: u64, visible: bool);
+    fn moth_page_zoom(window: u64, id: u64, zoom: f64, fit: bool);
     fn moth_remove_chrome(id: u64);
 }
 pub(crate) fn page_layout(window: u64, id: u64, bounds: (f64, f64, f64, f64)) {
@@ -112,6 +113,11 @@ pub(crate) fn page_layout(window: u64, id: u64, bounds: (f64, f64, f64, f64)) {
 pub(crate) fn page_visible(window: u64, id: u64, visible: bool) {
     unsafe {
         moth_page_visible(window, id, visible);
+    }
+}
+pub(crate) fn page_zoom(window: u64, id: u64, zoom: f64, fit: bool) {
+    unsafe {
+        moth_page_zoom(window, id, zoom, fit);
     }
 }
 pub(crate) fn attach_page(
@@ -154,4 +160,92 @@ pub(crate) fn private_configuration(
         objc2::rc::Retained::from_raw(moth_private_configuration(id))
             .expect("private configuration")
     }
+}
+
+unsafe extern "C" {
+    fn moth_popup_merge(window: u64, popup: *const c_char, id: u64, generation: u64) -> bool;
+    fn moth_page_operation(
+        window: u64,
+        id: u64,
+        operation: *const c_char,
+        argument: *const c_char,
+        callback: extern "C" fn(*const c_char, *mut c_void),
+        context: *mut c_void,
+    );
+    fn moth_page_evaluate(
+        window: u64,
+        id: u64,
+        script: *const c_char,
+        callback: extern "C" fn(*const c_char, *mut c_void),
+        context: *mut c_void,
+    );
+}
+
+pub(crate) fn merge_popup(window: u64, popup: &str, id: u64, generation: u64) -> bool {
+    let Ok(popup) = CString::new(popup) else {
+        return false;
+    };
+    unsafe { moth_popup_merge(window, popup.as_ptr(), id, generation) }
+}
+
+pub(crate) fn page_operation(
+    window: u64,
+    id: u64,
+    operation: &str,
+    argument: &str,
+) -> Option<String> {
+    extern "C" fn receive(value: *const c_char, context: *mut c_void) {
+        if !value.is_null() {
+            unsafe {
+                *(context as *mut Option<String>) =
+                    Some(CStr::from_ptr(value).to_string_lossy().into_owned());
+            }
+        }
+    }
+    let operation = CString::new(operation).ok()?;
+    let argument = CString::new(argument).ok()?;
+    let mut result = None;
+    unsafe {
+        moth_page_operation(
+            window,
+            id,
+            operation.as_ptr(),
+            argument.as_ptr(),
+            receive,
+            &mut result as *mut _ as *mut c_void,
+        );
+    }
+    result
+}
+
+pub(crate) fn evaluate_page(
+    window: u64,
+    id: u64,
+    script: &str,
+    callback: impl Fn(String) + Send + 'static,
+) -> wry::Result<()> {
+    type Callback = Box<dyn Fn(String) + Send>;
+    extern "C" fn receive(value: *const c_char, context: *mut c_void) {
+        // Swift calls exactly once, including when the page disappears or evaluation fails.
+        let callback = unsafe { Box::from_raw(context as *mut Callback) };
+        let value = if value.is_null() {
+            "null".into()
+        } else {
+            unsafe { CStr::from_ptr(value).to_string_lossy().into_owned() }
+        };
+        callback(value);
+    }
+    let script = CString::new(script)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let callback: Box<Callback> = Box::new(Box::new(callback));
+    unsafe {
+        moth_page_evaluate(
+            window,
+            id,
+            script.as_ptr(),
+            receive,
+            Box::into_raw(callback) as *mut c_void,
+        );
+    }
+    Ok(())
 }
