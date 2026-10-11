@@ -25,6 +25,7 @@ struct PaletteResult: Identifiable {
     let title: String
     let subtitle: String
     let symbol: String
+    var favicon: String? = nil
     var shortcut = ""
     let command: String
     var values: [String: Any] = [:]
@@ -50,7 +51,10 @@ enum PaletteSearch {
     static func results(snapshot: ChromeSnapshot, query: String, newTab: Bool) -> [PaletteResult] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var candidates = snapshot.tabs.map { tab in
-            PaletteResult(id: "tab:\(tab.id)", title: tab.title, subtitle: "Tab · " + tab.url, symbol: "rectangle.on.rectangle", command: "switch_tab", values: ["id": tab.id])
+            PaletteResult(id: "tab:\(tab.id)", title: tab.title.isEmpty ? "New Tab" : tab.title,
+                subtitle: tab.url == "about:blank" ? "" : developerAddress(tab.url),
+                symbol: tab.url == "about:blank" ? "square.dashed" : "globe", favicon: tab.favicon,
+                command: "switch_tab", values: ["id": tab.id])
         }
         let actions: [(String, String, String, String)] = [
             ("Web Inspector", "inspect", "curlybraces", "⌥⌘I"),
@@ -91,12 +95,14 @@ enum PaletteSearch {
                 }
             }
         }
+        // The new-tab bar opens quietly with tabs; commands remain searchable.
+        if newTab && query.isEmpty { candidates.removeAll { !$0.id.hasPrefix("tab:") } }
         var result = candidates.enumerated().compactMap { index, item -> (Int, Int, PaletteResult)? in
             guard let score = score(query, in: item.title + " " + item.subtitle) else { return nil }
             return (score, index, item)
         }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 > $1.0 }.prefix(30).map { $0.2 }
         if newTab || !query.isEmpty && result.isEmpty {
-            result.insert(PaletteResult(id: "navigate", title: query.isEmpty ? "Blank Tab" : "Open “\(query)”", subtitle: query.isEmpty ? "Start with an empty canvas" : "Search or navigate in a new tab", symbol: "plus", command: query.isEmpty ? "open_blank_tab" : "open_new_tab", values: query.isEmpty ? [:] : ["value": query]), at: 0)
+            result.insert(PaletteResult(id: "navigate", title: query.isEmpty ? "New Tab" : "Open “\(query)”", subtitle: "", symbol: "plus", command: query.isEmpty ? "open_blank_tab" : "open_new_tab", values: query.isEmpty ? [:] : ["value": query]), at: 0)
         }
         return result
     }

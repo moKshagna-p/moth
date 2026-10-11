@@ -883,18 +883,14 @@ private struct BrowserMenu: View {
 
 private struct CommandPalette: View {
     @ObservedObject var model: ChromeModel
-    @FocusState private var searchFocused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(model.paletteMode == .newTab ? "Search, enter a URL, or run an action" : "Tabs, history, bookmarks, and actions", text: $model.paletteQuery)
-                    .textFieldStyle(.plain).font(.system(size: 17)).focused($searchFocused)
-                    .onSubmit { model.submitPalette() }
-                    .onKeyPress(.upArrow) { model.movePalette(-1); return .handled }
-                    .onKeyPress(.downArrow) { model.movePalette(1); return .handled }
+                PaletteInput(model: model, placeholder: model.paletteMode == .newTab ? "Search or enter URL" : "Search tabs and actions")
+                    .frame(height: 24)
                 Text("esc").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-            }.padding(20)
+            }.padding(18)
             Divider().padding(.horizontal, 16)
             ScrollViewReader { proxy in
                 ScrollView {
@@ -902,28 +898,36 @@ private struct CommandPalette: View {
                         ForEach(Array(model.paletteResults.enumerated()), id: \.element.id) { index, result in
                             Button { model.submitPalette(result) } label: {
                                 HStack(spacing: 12) {
-                                    Image(systemName: result.symbol).frame(width: 20)
+                                    AsyncImage(url: result.favicon.flatMap(URL.init(string:))) { phase in
+                                        if let image = phase.image {
+                                            image.resizable().scaledToFit()
+                                        } else {
+                                            Image(systemName: result.symbol).foregroundStyle(.secondary)
+                                        }
+                                    }.frame(width: 16, height: 16)
+                                        .frame(width: 20).accessibilityHidden(true)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(result.title).lineLimit(1).font(.system(size: 13, weight: .medium))
-                                        Text(result.subtitle).lineLimit(1).font(.system(size: 11)).foregroundStyle(.secondary)
+                                        if !result.subtitle.isEmpty {
+                                            Text(result.subtitle).lineLimit(1).font(.system(size: 11)).foregroundStyle(.secondary)
+                                        }
                                     }
                                     Spacer(minLength: 8)
                                     Text(index == model.paletteSelection ? "↵" : result.shortcut)
                                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                                }.padding(.horizontal, 14).frame(height: 52).contentShape(Rectangle())
+                                }.padding(.horizontal, 12).frame(height: 44).contentShape(Rectangle())
                                     .background(index == model.paletteSelection ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 10))
                             }.buttonStyle(.plain).id(result.id)
                             .accessibilityAddTraits(index == model.paletteSelection ? .isSelected : [])
                         }
                     }.padding(.horizontal, 10).padding(.vertical, 8)
-                }.frame(height: CGFloat(min(6, model.paletteResults.count)) * 54 + 16)
+                }.frame(height: CGFloat(min(6, model.paletteResults.count)) * 46 + 16)
                     .onChange(of: model.paletteSelection) { _, index in
                         if model.paletteResults.indices.contains(index) { proxy.scrollTo(model.paletteResults[index].id) }
                     }
             }
         }
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
-        .onChange(of: model.paletteFocus) { _, _ in searchFocused = true }
         .onExitCommand { model.closePalette() }
     }
 }

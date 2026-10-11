@@ -69,6 +69,47 @@ import XCTest
         XCTAssertEqual(PaletteSearch.results(snapshot: state, query: "unique-no-match", newTab: false).first?.command, "open_new_tab")
         XCTAssertFalse(PaletteSearch.results(snapshot: state, query: "", newTab: false).contains { $0.id.hasPrefix("saved:") })
     }
+    func testNewTabPaletteStartsWithOnlyNavigationAndTabs() throws {
+        let state = try fixture()
+        let results = PaletteSearch.results(snapshot: state, query: "", newTab: true)
+        XCTAssertEqual(results.map(\.id), ["navigate", "tab:1"])
+        XCTAssertEqual(results.first?.title, "New Tab")
+        XCTAssertEqual(results.first?.subtitle, "")
+        XCTAssertEqual(results.last?.subtitle, "localhost:3000/app")
+        XCTAssertTrue(PaletteSearch.results(snapshot: state, query: "Inspector", newTab: true).contains { $0.command == "inspect" })
+    }
+    func testPaletteUsesPageFaviconAndBlankTabFallback() throws {
+        let json = fixtureJSON().replacingOccurrences(of: #""title":"Local app""#,
+            with: #""title":"Local app","favicon":"https://example.com/site-icon.png""#)
+        let state = try JSONDecoder().decode(ChromeSnapshot.self, from: Data(json.utf8))
+        let tab = PaletteSearch.results(snapshot: state, query: "", newTab: true).last
+        XCTAssertEqual(tab?.favicon, "https://example.com/site-icon.png")
+        let blankJSON = fixtureJSON().replacingOccurrences(of: "http://localhost:3000/app", with: "about:blank")
+        let blank = try JSONDecoder().decode(ChromeSnapshot.self, from: Data(blankJSON.utf8))
+        let blankTab = PaletteSearch.results(snapshot: blank, query: "", newTab: true).last
+        XCTAssertNil(blankTab?.favicon)
+        XCTAssertEqual(blankTab?.symbol, "square.dashed")
+        XCTAssertEqual(blankTab?.subtitle, "")
+    }
+    func testPaletteEditorDisablesTypingAssistanceAndIsIsolated() {
+        _ = NSApplication.shared
+        let cell = PaletteInputCell(textCell: "")
+        let editor = cell.fieldEditor(for: NSTextField())!
+        _ = cell.setUpFieldEditorAttributes(editor)
+        XCTAssertTrue(editor.isFieldEditor)
+        XCTAssertFalse(editor.isAutomaticTextCompletionEnabled)
+        XCTAssertEqual(editor.inlinePredictionType, .no)
+        XCTAssertEqual(editor.mathExpressionCompletionType, .no)
+        XCTAssertFalse(editor.isContinuousSpellCheckingEnabled)
+        XCTAssertFalse(editor.isGrammarCheckingEnabled)
+        XCTAssertFalse(editor.isAutomaticSpellingCorrectionEnabled)
+        XCTAssertFalse(editor.isAutomaticTextReplacementEnabled)
+        XCTAssertFalse(editor.isAutomaticQuoteSubstitutionEnabled)
+        XCTAssertFalse(editor.isAutomaticDashSubstitutionEnabled)
+        XCTAssertEqual(editor.enabledTextCheckingTypes, 0)
+        let anotherCell = PaletteInputCell(textCell: "")
+        XCTAssertFalse(editor === anotherCell.fieldEditor(for: NSTextField()))
+    }
     func testDeveloperAddressKeepsPortsPathsQueriesAndFragments() {
         XCTAssertEqual(developerAddress("http://localhost:3000/api/users?debug=1#result"), "localhost:3000/api/users?debug=1#result")
         XCTAssertEqual(developerAddress("https://example.com/"), "example.com")
